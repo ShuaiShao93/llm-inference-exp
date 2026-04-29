@@ -31,6 +31,16 @@ def parse_args():
         help="Sliding window attention size (default: 32768)",
     )
     parser.add_argument("--num_runs", type=int, default=5)
+    parser.add_argument(
+        "--kv_cache_precision",
+        default="fp8",
+        help="KV cache dtype: fp8, fp8_e5m2, fp8_e4m3, or auto (default: fp8).",
+    )
+    parser.add_argument(
+        "--attention_backend",
+        default="FLASH_ATTN",
+        help="Attention backend: FLASH_ATTN, FLASHINFER, TRITON_ATTN, etc. (default: FLASH_ATTN).",
+    )
     return parser.parse_args()
 
 
@@ -83,11 +93,14 @@ def main():
 
     check_precision(args.model, precision)
 
+    attention_backend = args.attention_backend.upper()
+
     llm_kwargs = {
         "model": args.model,
         "tokenizer_mode": "mistral",
-        "attention_config": {"backend": "FLASH_ATTN"},
+        "attention_config": {"backend": attention_backend},
         "enable_flashinfer_autotune": False,
+        "kv_cache_dtype": args.kv_cache_precision,
         "limit_mm_per_prompt": {"image": 0},
         "enable_prefix_caching": False,
         "max_model_len": args.input_tokens + args.max_output_tokens,
@@ -107,7 +120,8 @@ def main():
     print(f"Input tokens:     {args.input_tokens}")
     print(f"Max output tokens:{args.max_output_tokens}")
     print(f"Sliding window:   {args.sliding_window}")
-    print(f"Attention backend:FLASH_ATTN")
+    print(f"KV cache prec.:   {args.kv_cache_precision}")
+    print(f"Attention backend:{attention_backend}")
     print(f"Prefix caching:   disabled")
     print()
 
