@@ -27,8 +27,13 @@ def parse_args():
     parser.add_argument(
         "--sliding_window",
         type=int,
-        default=32768,
-        help="Sliding window attention size (default: 32768)",
+        default=None,
+        help="Sliding window attention size. Omit to use the model's default.",
+    )
+    parser.add_argument(
+        "--tokenizer_mode",
+        default="auto",
+        help="Tokenizer mode: auto, mistral, slow (default: auto). Use 'mistral' for Mistral/Ministral models.",
     )
     parser.add_argument("--num_runs", type=int, default=5)
     parser.add_argument(
@@ -97,15 +102,17 @@ def main():
 
     llm_kwargs = {
         "model": args.model,
-        "tokenizer_mode": "mistral",
+        "tokenizer_mode": args.tokenizer_mode,
         "attention_config": {"backend": attention_backend},
         "enable_flashinfer_autotune": False,
         "kv_cache_dtype": args.kv_cache_precision,
         "limit_mm_per_prompt": {"image": 0},
         "enable_prefix_caching": False,
         "max_model_len": args.input_tokens + args.max_output_tokens,
-        "hf_overrides": {"sliding_window": args.sliding_window},
     }
+
+    if args.sliding_window is not None:
+        llm_kwargs["hf_overrides"] = {"sliding_window": args.sliding_window}
 
     # Only set explicit quantization for vLLM-managed methods (awq, gptq, …)
     # fp4/fp8 are embedded in the model config and auto-detected by vLLM
@@ -119,7 +126,7 @@ def main():
     print(f"Precision:        {args.precision}")
     print(f"Input tokens:     {args.input_tokens}")
     print(f"Max output tokens:{args.max_output_tokens}")
-    print(f"Sliding window:   {args.sliding_window}")
+    print(f"Sliding window:   {args.sliding_window if args.sliding_window is not None else 'model default'}")
     print(f"KV cache prec.:   {args.kv_cache_precision}")
     print(f"Attention backend:{attention_backend}")
     print(f"Prefix caching:   disabled")
