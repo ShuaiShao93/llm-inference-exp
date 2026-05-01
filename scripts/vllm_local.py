@@ -46,6 +46,12 @@ def parse_args():
         default="FLASH_ATTN",
         help="Attention backend: FLASH_ATTN, FLASHINFER, TRITON_ATTN, etc. (default: FLASH_ATTN).",
     )
+    parser.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        default=0.95,
+        help="Fraction of GPU memory vLLM may use for weights + KV cache (default: 0.95).",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +115,7 @@ def main():
         "limit_mm_per_prompt": {"image": 0},
         "enable_prefix_caching": False,
         "max_model_len": args.input_tokens + args.max_output_tokens,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
     }
 
     if args.sliding_window is not None:
@@ -129,6 +136,7 @@ def main():
     print(f"Sliding window:   {args.sliding_window if args.sliding_window is not None else 'model default'}")
     print(f"KV cache prec.:   {args.kv_cache_precision}")
     print(f"Attention backend:{attention_backend}")
+    print(f"GPU mem util:     {args.gpu_memory_utilization}")
     print(f"Prefix caching:   disabled")
     print()
 
