@@ -46,6 +46,12 @@ def parse_args():
         default="FLASH_ATTN",
         help="Attention backend: FLASH_ATTN, FLASHINFER, TRITON_ATTN, etc. (default: FLASH_ATTN).",
     )
+    parser.add_argument(
+        "--profile_dir",
+        default=None,
+        help="If set, collect a torch profiler trace of the first post-warmup run "
+             "and save it to this directory. Open with Perfetto UI or TensorBoard.",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +78,20 @@ def get_model_precision(model_id):
         return "fp8"
     if method in ("awq", "gptq", "bitsandbytes"):
         return method
+
+    # compressed-tensors models: infer precision from config_groups weight num_bits
+    if method == "compressed-tensors":
+        groups = qcfg.get("config_groups", {})
+        if groups:
+            first = next(iter(groups.values()))
+            w = first.get("weights", {})
+            bits, wtype = w.get("num_bits"), w.get("type", "")
+            if bits == 4 and wtype == "float":
+                return "fp4"
+            if bits == 8 and wtype == "float":
+                return "fp8"
+            if bits == 8 and wtype == "int":
+                return "int8"
 
     dtype = cfg.get("torch_dtype", "bfloat16")
     return {"bfloat16": "bf16", "float16": "fp16"}.get(dtype, dtype)
@@ -114,6 +134,14 @@ def main():
     if args.sliding_window is not None:
         llm_kwargs["hf_overrides"] = {"sliding_window": args.sliding_window}
 
+    if args.profile_dir is not None:
+        profile_dir = os.path.abspath(args.profile_dir)
+        os.makedirs(profile_dir, exist_ok=True)
+        llm_kwargs["profiler_config"] = {
+            "profiler": "torch",
+            "torch_profiler_dir": profile_dir,
+        }
+
     # Only set explicit quantization for vLLM-managed methods (awq, gptq, …)
     # fp4/fp8 are embedded in the model config and auto-detected by vLLM
     if precision not in _DTYPE_VALUES and precision not in ("fp4", "fp8", "auto"):
@@ -130,6 +158,8 @@ def main():
     print(f"KV cache prec.:   {args.kv_cache_precision}")
     print(f"Attention backend:{attention_backend}")
     print(f"Prefix caching:   disabled")
+    if args.profile_dir is not None:
+        print(f"Profile dir:      {os.path.abspath(args.profile_dir)}")
     print()
 
     llm = LLM(**llm_kwargs)
@@ -169,9 +199,14 @@ def main():
     latencies = []
     print(f"Running {args.num_runs} iterations...")
     for i in range(args.num_runs):
+        if i == 0 and args.profile_dir is not None:
+            llm.start_profile()
         start = time.perf_counter()
         llm.generate(prompt, sampling_params, use_tqdm=False)
         elapsed_ms = (time.perf_counter() - start) * 1000
+        if i == 0 and args.profile_dir is not None:
+            llm.stop_profile()
+            print(f"  Trace saved to: {os.path.abspath(args.profile_dir)}")
         latencies.append(elapsed_ms)
         print(f"  Run {i + 1}: {elapsed_ms:.1f} ms")
 
