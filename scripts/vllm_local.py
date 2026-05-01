@@ -47,6 +47,12 @@ def parse_args():
         help="Attention backend: FLASH_ATTN, FLASHINFER, TRITON_ATTN, etc. (default: FLASH_ATTN).",
     )
     parser.add_argument(
+        "--flashinfer_autotune",
+        action="store_true",
+        default=False,
+        help="Enable FlashInfer autotuning (only meaningful with FLASHINFER backend).",
+    )
+    parser.add_argument(
         "--profile_dir",
         default=None,
         help="If set, collect a torch profiler trace of the first post-warmup run "
@@ -124,7 +130,7 @@ def main():
         "model": args.model,
         "tokenizer_mode": args.tokenizer_mode,
         "attention_config": {"backend": attention_backend},
-        "enable_flashinfer_autotune": False,
+        "enable_flashinfer_autotune": args.flashinfer_autotune,
         "kv_cache_dtype": args.kv_cache_precision,
         "limit_mm_per_prompt": {"image": 0},
         "enable_prefix_caching": False,
@@ -157,6 +163,7 @@ def main():
     print(f"Sliding window:   {args.sliding_window if args.sliding_window is not None else 'model default'}")
     print(f"KV cache prec.:   {args.kv_cache_precision}")
     print(f"Attention backend:{attention_backend}")
+    print(f"FlashInfer autotune:{args.flashinfer_autotune}")
     print(f"Prefix caching:   disabled")
     if args.profile_dir is not None:
         print(f"Profile dir:      {os.path.abspath(args.profile_dir)}")
