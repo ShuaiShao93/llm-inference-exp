@@ -193,4 +193,4 @@ Key points:
 | 1k | Llama-3.2-3B FP8-Block | fp8 | fp8 | ~14 ms |
 | 15k | Llama-3.2-3B FP8-Block | fp8 | fp8 | ~21 ms |
 | 100k | Llama-3.2-3B FP8-Block | fp8 | fp8 | ~5300 ms |
-| 100k | Llama-3.2-3B NVFP4 (modelopt) | fp4 | fp8 | ~4421 ms |
+| 100k | Llama-3.2-3B NVFP4 (modelopt) | fp4 | fp8 | ~4851 ms |

@@ -47,16 +47,16 @@ def parse_args():
         help="Attention backend: FLASH_ATTN, FLASHINFER, TRITON_ATTN, etc. (default: FLASHINFER).",
     )
     parser.add_argument(
+        "--disable_chunked_prefill",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Disable chunked prefill (default: True; use --no-disable_chunked_prefill to enable).",
+    )
+    parser.add_argument(
         "--flashinfer_autotune",
         action="store_true",
         default=False,
         help="Enable FlashInfer autotuning (only meaningful with FLASHINFER backend).",
-    )
-    parser.add_argument(
-        "--disable_chunked_prefill",
-        action="store_true",
-        default=False,
-        help="Disable chunked prefill (processes full sequence in one pass per layer).",
     )
     parser.add_argument(
         "--profile_dir",
@@ -211,8 +211,12 @@ def main():
     print("Warming up...")
     llm.generate(prompt, sampling_params, use_tqdm=False)
 
+    import ctypes
+    cudart = ctypes.CDLL("libcudart.so")
+
     latencies = []
     print(f"Running {args.num_runs} iterations...")
+    cudart.cudaProfilerStart()
     for i in range(args.num_runs):
         if i == 0 and args.profile_dir is not None:
             llm.start_profile()
@@ -224,6 +228,7 @@ def main():
             print(f"  Trace saved to: {os.path.abspath(args.profile_dir)}")
         latencies.append(elapsed_ms)
         print(f"  Run {i + 1}: {elapsed_ms:.1f} ms")
+    cudart.cudaProfilerStop()
 
     print()
     print(f"Mean latency:   {np.mean(latencies):.1f} ms")

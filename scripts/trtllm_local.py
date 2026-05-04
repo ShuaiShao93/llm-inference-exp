@@ -34,6 +34,12 @@ def parse_args():
         default="auto",
         help="Tokenizer mode: auto or slow (default: auto).",
     )
+    parser.add_argument(
+        "--disable_chunked_prefill",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Disable chunked prefill (default: True; use --no-disable_chunked_prefill to enable).",
+    )
     return parser.parse_args()
 
 
@@ -116,8 +122,8 @@ def main():
         kv_cache_config=KvCacheConfig(
             dtype=args.kv_cache_precision,
             free_gpu_memory_fraction=0.9,
-            enable_block_reuse=False,
         ),
+        enable_chunked_prefill=not args.disable_chunked_prefill,
         max_seq_len=max_seq_len,
         max_num_tokens=max_seq_len,
     )
@@ -130,6 +136,7 @@ def main():
     print(f"Input tokens:     {args.input_tokens}")
     print(f"Max output tokens:{args.max_output_tokens}")
     print(f"KV cache prec.:   {args.kv_cache_precision}")
+    print(f"Chunked prefill:  {'disabled' if args.disable_chunked_prefill else 'enabled'}")
     print(f"Max seq len:      {max_seq_len}")
     print()
 
@@ -143,7 +150,6 @@ def main():
         or getattr(inner, "_vocab_size", None)
         or len(inner.get_vocab())
     )
-    prompt_token_ids = random.choices(range(1, vocab_size - 1), k=args.input_tokens)
 
     sampling_params = SamplingParams(
         max_tokens=args.max_output_tokens,
@@ -153,16 +159,22 @@ def main():
     )
 
     print("Warming up...")
-    llm.generate(prompt_token_ids, sampling_params)
+    llm.generate(random.choices(range(1, vocab_size - 1), k=args.input_tokens), sampling_params)
+
+    import ctypes
+    cudart = ctypes.CDLL("libcudart.so")
 
     latencies = []
     print(f"Running {args.num_runs} iterations...")
+    cudart.cudaProfilerStart()
     for i in range(args.num_runs):
+        prompt_token_ids = random.choices(range(1, vocab_size - 1), k=args.input_tokens)
         start = time.perf_counter()
         llm.generate(prompt_token_ids, sampling_params)
         elapsed_ms = (time.perf_counter() - start) * 1000
         latencies.append(elapsed_ms)
         print(f"  Run {i + 1}: {elapsed_ms:.1f} ms")
+    cudart.cudaProfilerStop()
 
     print()
     print(f"Mean latency:   {np.mean(latencies):.1f} ms")

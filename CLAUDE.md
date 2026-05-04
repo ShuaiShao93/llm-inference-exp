@@ -24,5 +24,5 @@
 
 - **FP4 > FP8**: ~17% faster in TRT-LLM and ~6% faster in vLLM at 100k input tokens.
 - **FP8 KV cache**: always use `--kv_cache_precision fp8`; reduces memory footprint and improves throughput with negligible accuracy impact.
-- **Disable chunked prefill in vLLM for long inputs with short output**: `--disable_chunked_prefill` saves ~3% at 100k tokens; negligible at ≤15k tokens. Only beneficial when there is no decode-phase batching to hide (i.e. batch size 1, output ≈ 1 token).
-- **TRT-LLM vs vLLM**: TRT-LLM is ~1.3–1.4× faster at 100k input tokens, primarily because it uses SM120-native FP4 GEMM kernels (`DeviceGemmFp4GemmSm120`) and runs attention as a single kernel per layer rather than chunked FlashInfer calls.
+- **Chunked prefill is disabled in both scripts**: chunked prefill requires `use_paged_context_fmha=True` (paged KV access in the attention kernel), which adds ~8% overhead in TRT-LLM vs the default contiguous gather path. Disabled by default; only re-enable if testing multi-request batching or prefix caching.
+- **TRT-LLM vs vLLM gap is entirely attention**: at both 15k and 100k tokens GEMM is within 5%; TRT-LLM's `fmha_v2` (contiguous gather) is 1.56× faster than vLLM's FlashInfer `BatchPrefillWithPagedKVCacheKernel` (paged) at 100k tokens — the gap is SM120-native kernel quality plus contiguous vs paged memory access.
