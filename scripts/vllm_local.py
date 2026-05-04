@@ -53,6 +53,12 @@ def parse_args():
         help="Enable FlashInfer autotuning (only meaningful with FLASHINFER backend).",
     )
     parser.add_argument(
+        "--disable_chunked_prefill",
+        action="store_true",
+        default=False,
+        help="Disable chunked prefill (processes full sequence in one pass per layer).",
+    )
+    parser.add_argument(
         "--profile_dir",
         default=None,
         help="If set, collect a torch profiler trace of the first post-warmup run "
@@ -134,6 +140,7 @@ def main():
         "kv_cache_dtype": args.kv_cache_precision,
         "limit_mm_per_prompt": {"image": 0},
         "enable_prefix_caching": False,
+        "enable_chunked_prefill": not args.disable_chunked_prefill,
         "max_model_len": args.input_tokens + args.max_output_tokens,
     }
 
@@ -163,6 +170,7 @@ def main():
     print(f"Sliding window:   {args.sliding_window if args.sliding_window is not None else 'model default'}")
     print(f"KV cache prec.:   {args.kv_cache_precision}")
     print(f"Attention backend:{attention_backend}")
+    print(f"Chunked prefill:  {'disabled' if args.disable_chunked_prefill else 'enabled'}")
     print(f"FlashInfer autotune:{args.flashinfer_autotune}")
     print(f"Prefix caching:   disabled")
     if args.profile_dir is not None:
