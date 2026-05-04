@@ -34,6 +34,12 @@ def parse_args():
         default="auto",
         help="Tokenizer mode: auto or slow (default: auto).",
     )
+    parser.add_argument(
+        "--profile_dir",
+        default=None,
+        help="If set, collect a torch profiler trace of the first post-warmup run "
+             "and save it to this directory. Open with Perfetto UI or TensorBoard.",
+    )
     return parser.parse_args()
 
 
@@ -125,12 +131,18 @@ def main():
     if precision in _DTYPE_VALUES:
         llm_kwargs["dtype"] = precision
 
+    if args.profile_dir is not None:
+        profile_dir = os.path.abspath(args.profile_dir)
+        os.makedirs(profile_dir, exist_ok=True)
+
     print(f"Model:            {args.model}")
     print(f"Precision:        {args.precision}")
     print(f"Input tokens:     {args.input_tokens}")
     print(f"Max output tokens:{args.max_output_tokens}")
     print(f"KV cache prec.:   {args.kv_cache_precision}")
     print(f"Max seq len:      {max_seq_len}")
+    if args.profile_dir is not None:
+        print(f"Profile dir:      {profile_dir}")
     print()
 
     llm = LLM(**llm_kwargs)
@@ -158,9 +170,25 @@ def main():
     latencies = []
     print(f"Running {args.num_runs} iterations...")
     for i in range(args.num_runs):
+        if i == 0 and args.profile_dir is not None:
+            import torch
+            prof = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=True,
+                with_stack=False,
+            )
+            prof.__enter__()
         start = time.perf_counter()
         llm.generate(prompt_token_ids, sampling_params)
         elapsed_ms = (time.perf_counter() - start) * 1000
+        if i == 0 and args.profile_dir is not None:
+            prof.__exit__(None, None, None)
+            trace_path = os.path.join(profile_dir, "trtllm_trace.json")
+            prof.export_chrome_trace(trace_path)
+            print(f"  Trace saved to: {trace_path}")
         latencies.append(elapsed_ms)
         print(f"  Run {i + 1}: {elapsed_ms:.1f} ms")
 

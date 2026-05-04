@@ -14,7 +14,8 @@
 ## Benchmarking
 
 - scripts/ directory has scripts for running benchmark
-- trtllm must be run in a miniconda env (`~/miniconda3/envs/trtllm/bin/python`), but vllm can be run in the system env (`/usr/bin/python3.12`)
+- trtllm must be run with `PYTHONNOUSERSITE=1 ~/miniconda3/envs/trtllm/bin/python` (prevents user-local packages from shadowing the conda torch); vllm runs from the system env (`/usr/bin/python3.12`)
+- To profile GPU kernels, use the `profile-llm` skill (nsys required; torch.profiler won't capture GPU kernels from subprocesses)
 - Always pick the most optimal default arguments unless you are asked to test a specific config.
 - Never run two benchmark processes at the same time. They share the GPU; concurrent runs corrupt results and can OOM.
 - If a pre-quantized checkpoint at the desired precision is not available on HuggingFace, use `scripts/quantize_trtllm.py` to create one from a BF16 model before benchmarking.
