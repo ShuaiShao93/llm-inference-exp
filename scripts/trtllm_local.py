@@ -61,6 +61,13 @@ def get_model_precision(model_id):
     if method in ("awq", "gptq", "bitsandbytes"):
         return method
 
+    if method == "modelopt":
+        algo = qcfg.get("quant_algo", "").upper()
+        if "NVFP4" in algo or "MXFP4" in algo:
+            return "fp4"
+        if "FP8" in algo:
+            return "fp8"
+
     if method == "compressed-tensors":
         groups = qcfg.get("config_groups", {})
         if groups:
