@@ -38,8 +38,8 @@ def parse_args():
     parser.add_argument("--num_runs", type=int, default=5)
     parser.add_argument(
         "--kv_cache_precision",
-        default="auto",
-        help="KV cache dtype: fp8, fp8_e5m2, fp8_e4m3, or auto (default: auto).",
+        default="fp8",
+        help="KV cache dtype: fp8, fp8_e5m2, fp8_e4m3, or auto (default: fp8).",
     )
     parser.add_argument(
         "--attention_backend",
