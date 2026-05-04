@@ -43,8 +43,8 @@ def parse_args():
     )
     parser.add_argument(
         "--attention_backend",
-        default="FLASH_ATTN",
-        help="Attention backend: FLASH_ATTN, FLASHINFER, TRITON_ATTN, etc. (default: FLASH_ATTN).",
+        default="FLASHINFER",
+        help="Attention backend: FLASH_ATTN, FLASHINFER, TRITON_ATTN, etc. (default: FLASHINFER).",
     )
     parser.add_argument(
         "--flashinfer_autotune",
