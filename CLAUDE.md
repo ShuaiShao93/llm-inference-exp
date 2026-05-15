@@ -21,6 +21,7 @@
 - Never run two benchmark processes at the same time. They share the GPU; concurrent runs corrupt results and can OOM.
 - If a pre-quantized checkpoint at the desired precision is not available on HuggingFace, use `scripts/quantize_trtllm.py` to create one from a BF16 model. Store quantized models under `~/model_ckpt/` (NOT `/tmp` — it can be cleared on reboot).
 - For HF custom-code models (e.g. DeepSeek-V2-Lite), modelopt quantization doesn't carry over `configuration_*.py` / `modeling_*.py` / `tokenization_*.py` files. Copy them from the source model dir into the quantized output dir before loading.
+- **Quantization tool selection**: prefer a pre-quantized checkpoint from HuggingFace when available (search for `<model> NVFP4`, `<model> FP8`). When you need to quantize yourself: (1) `scripts/quantize_trtllm.py` uses `nvidia-modelopt` which lags transformers updates by months — newer models (e.g. Gemma 4) may not work; (2) for those, install `llm-compressor` (vLLM project) which tracks transformers releases more closely, but currently produces W4A16 not W4A4 NVFP4. Don't upgrade transformers/modelopt in the trtllm conda env to fix this — it breaks TRT-LLM's pinned deps.
 
 ## Daily Maintenance
 
