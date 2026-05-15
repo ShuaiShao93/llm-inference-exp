@@ -118,11 +118,7 @@ pip show tensorrt-llm   # check Requires: field for the dep list
 pip install --pre <deps...>
 ```
 
-Two packages commonly need a final pin after other deps upgrade them:
-
-```bash
-pip install "numpy<2.4" "setuptools<80"
-```
+If TRT-LLM fails at import with an error about `numpy` or `setuptools` after deps install, downgrade those to a version compatible with the TRT-LLM release.
 
 ---
 
@@ -186,11 +182,3 @@ Key points:
 - KV cache is not baked in; set `--kv_cache_precision fp8` at inference time
 - Mirrors the NVIDIA Model-Optimizer approach: https://nvidia.github.io/TensorRT-LLM/features/quantization.html
 
-## Reference: Expected Benchmark Numbers (RTX PRO 6000 Blackwell, SM120)
-
-| Input tokens | Model | Precision | KV cache | Mean latency |
-|---|---|---|---|---|
-| 1k | Llama-3.2-3B FP8-Block | fp8 | fp8 | ~14 ms |
-| 15k | Llama-3.2-3B FP8-Block | fp8 | fp8 | ~21 ms |
-| 100k | Llama-3.2-3B FP8-Block | fp8 | fp8 | ~5300 ms |
-| 100k | Llama-3.2-3B NVFP4 (modelopt) | fp4 | fp8 | ~4851 ms |

@@ -1,13 +1,13 @@
 ---
 name: profile-llm
-description: Profile TRT-LLM and/or vLLM GPU kernels using nsys and compare the results to explain latency differences. Use when asked to profile, compare kernel breakdown, or investigate why one framework is slower.
+description: Profile TRT-LLM and/or vLLM GPU kernels with nsys (kernel breakdown) and ncu (per-kernel metrics) and compare results to explain latency differences. Use when asked to profile, compare kernel breakdown, dive into a specific kernel's bottleneck, or investigate why one framework is slower.
 argument-hint: [--trtllm-cmd <cmd>] [--vllm-cmd <cmd>]
 allowed-tools: [Bash, Read, Write, Edit]
 ---
 
 # Profile LLM Inference (TRT-LLM vs vLLM)
 
-Profile GPU kernel execution for TRT-LLM and/or vLLM using NVIDIA Nsight Systems (nsys), then compare kernel breakdowns.
+Two-tool workflow: **nsys** (Nsight Systems) for system-wide kernel time breakdown and **ncu** (Nsight Compute) for per-kernel bottleneck analysis. Use nsys first to find where time is spent, then ncu to understand *why* a specific kernel is slow.
 
 ## Arguments
 
@@ -101,42 +101,110 @@ def breakdown(db_path, runs, label, wall_ms):
 
 ## Step 5: Interpret the Results
 
-**Attention** — compare `fmha_v2` (TRT-LLM) vs `BatchPrefillWithPagedKVCache` (vLLM, FlashInfer):
-- Both frameworks use paged KV cache. The gap is SM120-native kernel quality: `fmha_v2` (4851ms) vs FlashInfer `BatchPrefillWithPagedKVCacheKernel` (6981ms) = 1.44× at 100k tokens.
+For each category, compare absolute time and percentage of wall:
 
-**GEMM** — compare framework-native SM120 kernels (TRT-LLM) vs FlashInferCutlass (vLLM):
-- At 15k tokens GEMMs are roughly equal; at 100k the attention gap dominates.
+- **Attention** is usually the dominant cost at long input lengths (O(N²)). Compare TRT-LLM's `fmha_v2_*` family vs vLLM's FlashInfer `BatchPrefillWithPagedKVCacheKernel` (or `flash_fwd_kernel` for MLA backends).
+- **GEMM** covers projections (QKV / output / FFN) and MoE expert matmuls. Usually similar across frameworks for the same model.
+- **Norm/quant** includes RMS norm + activation quantization. Differences here often reflect kernel fusion choices (e.g. fused silu+fp4-quant vs separate kernels).
 
-**Norm/quant** — broadly similar; vLLM fuses silu+fp4-quant into one kernel (`silu_mul_cvt_fp16_to_fp4`) while TRT-LLM runs them separately.
-
-**Classifier note**: the breakdown script classifies by substring. Triton kernels named `triton_red_fused_..._scaled_fp4_quant_zeros_*` contain "quant" but not "quantize", so they fall into "other" for vLLM. Add `"quant"` to the norm/quant keyword list if you need finer accuracy.
+**Classifier note**: the breakdown script classifies by substring. If a kernel name doesn't match expected keywords (e.g. Triton fused kernels with custom names), it falls into "other". Tune the keyword list per workload as needed.
 
 ---
 
-## Reference: Observed Results (RTX PRO 6000, SM120, Llama 3.2 3B, FP4+FP8KV)
+# Part 2: Per-Kernel Bottleneck Analysis with ncu
 
-### 15k tokens (5 timed runs, cudaProfilerApi-gated)
+Use ncu after nsys identifies a kernel of interest. ncu gives per-kernel metrics: SM compute throughput, memory throughput, L1/L2 cache utilization, achieved occupancy, and an automated bottleneck verdict ("latency-bound" vs "compute-bound" vs "memory-bound").
 
-| | TRT-LLM | vLLM |
+## Caveats (Read First)
+
+- **Use ncu 2024+ for SM120**. The system default at `/usr/bin/ncu` may be too old. Check `/opt/nvidia/nsight-compute/<latest>/ncu` and prefer the newest available.
+- **Profiling counters need permission.** On first use you'll hit `ERR_NVGPUCTRPERM`. Fix once with:
+  ```bash
+  echo 'options nvidia "NVreg_RestrictProfilingToAdminUsers=0"' | sudo tee /etc/modprobe.d/nvidia-profiling.conf
+  sudo systemctl stop google-cloud-ops-agent.service     # only if it holds /dev/nvidia*
+  sudo modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia
+  sudo modprobe nvidia
+  sudo systemctl start google-cloud-ops-agent.service
+  ```
+- **Write outputs to `~/ncu_profiles/`, not `/tmp`** (`/tmp/profiles` may be cleaned between sessions).
+- **ncu has ~100× slowdown per profiled kernel** — limit captures with `--kernel-name regex:<name>` and `--launch-count 1-3`. Use `--launch-skip N` to bypass warmup/setup launches.
+- **`--set full` collects all metrics**; `--set basic` is much faster but less detail. Use `full` once you've found the target kernel.
+
+## Step A: Discover the Main Kernel and Its Launch Index
+
+First find which kernel variants are launched and identify the *main prefill kernel* (not warmup/setup launches). Discovery pass with `--set basic`:
+
+```bash
+/opt/nvidia/nsight-compute/<ver>/ncu \
+    --kernel-name regex:"fmha_v2|flash_fwd|BatchPrefill" \
+    --launch-skip 100 --launch-count 50 \
+    --section LaunchStats --section SpeedOfLight \
+    -o ~/ncu_profiles/discover \
+    --force-overwrite \
+    <benchmark command>
+```
+
+Group captured launches by grid size to identify the prefill kernel (typically the largest grid):
+
+```bash
+/opt/nvidia/nsight-compute/<ver>/ncu --import ~/ncu_profiles/discover.ncu-rep --csv --section SpeedOfLight | \
+  python3 -c "
+import sys, csv
+launches = {}
+for row in csv.DictReader(sys.stdin):
+    if row['Metric Name'] == 'Duration':
+        v = float(row['Metric Value'])
+        u = row['Metric Unit']; v = v*1000 if u=='ms' else v/1000 if u=='ns' else v
+        launches.setdefault((row['Grid Size'], row['Block Size']), []).append(v)
+for (g,b),d in sorted(launches.items(), key=lambda x:-sum(x[1])):
+    print(f'{g:<25} {b:<15} n={len(d):>4} mean={sum(d)/len(d):>8.1f}us total={sum(d):>9.1f}us')
+"
+```
+
+Pick the row with the largest mean duration and matching grid shape — that's the main kernel. Note its launch index (you'll need `--launch-skip` for the targeted profile).
+
+## Step B: Profile a Single Representative Launch
+
+```bash
+/opt/nvidia/nsight-compute/<ver>/ncu \
+    --kernel-name regex:"<exact kernel name>" \
+    --launch-skip <N> --launch-count 1 --set full \
+    -o ~/ncu_profiles/<label>_attn \
+    --force-overwrite \
+    <benchmark command>
+```
+
+Choose `--launch-skip` so the captured launch is in the timed-run phase (past warmup). For most prefill cases, `--launch-skip 100` is enough to skip past warmup variants.
+
+## Step C: Extract Key Metrics
+
+```bash
+/opt/nvidia/nsight-compute/<ver>/ncu --import ~/ncu_profiles/<label>_attn.ncu-rep --page details 2>&1 | \
+  grep -E "^[[:space:]]+(Duration|DRAM Throughput|Memory Throughput|L1/TEX Cache Throughput|L2 Cache Throughput|Compute \(SM\) Throughput|Block Size|Grid Size|Registers Per Thread|Theoretical Occupancy|Achieved Occupancy)"
+```
+
+## Step D: Interpret the Verdict
+
+NVIDIA's automated SOL (Speed of Light) analysis classifies each kernel:
+
+| Verdict | Meaning | What to look for |
 |---|---|---|
-| Wall latency | ~193 ms | ~256 ms |
-| Attention (GPU) | 86.6 ms/run (45% of wall) | 149.6 ms/run (58% of wall) |
-| GEMM (GPU) | 58.5 ms/run (30%) | 59.8 ms/run (23%) |
-| Norm/quant (GPU) | 22.6 ms/run (12%) | 21.9 ms/run (9%) |
+| **Compute-bound** (SM throughput > 80%) | Healthy; saturating the tensor pipe | Look for ways to reduce FLOPs (precision, algorithm) |
+| **Memory-bound** (Memory throughput > 80%, SM throughput < 60%) | Reading/writing too much DRAM | Smaller working set, better cache reuse |
+| **Latency-bound** (both throughputs < 60%) | Stalled waiting (instruction issue, memory latency, dependency) | Many small launches → bigger work per kernel; warp stalls; low occupancy |
 
-**Root cause at 15k**: attention is 1.73× slower in vLLM due to paged KV cache (indirect memory access). GEMM is essentially equal.
+Other metrics that matter:
+- **L2 throughput**: 30%+ means good cache reuse; 10%- means working set spills to DRAM
+- **Achieved occupancy**: < 25% often limited by registers/shared memory (check Theoretical Occupancy notes)
+- **DRAM throughput (GB/s)** absolute number compared to peak (~3 TB/s on RTX PRO 6000 / SM120)
 
-### 100k tokens (3 timed runs, cudaProfilerApi-gated, both with paged KV)
+## Step E: Compare Multiple Kernels
 
-| | TRT-LLM | vLLM |
-|---|---|---|
-| Wall latency | ~4851 ms | ~6981 ms |
-| Attention (GPU) | ~84% of wall | ~90% of wall |
-| GEMM (GPU) | ~9% of wall | ~6% of wall |
-| Norm/quant (GPU) | ~4% of wall | ~2% of wall |
+To compare attention kernels across frameworks (or attention backends within vLLM), profile each separately and tabulate the same metrics from Step C side by side. Key columns to compare: per-launch duration, total number of launches (from nsys), grid size, compute (SM) throughput, L2 throughput, DRAM GB/s, and the SOL verdict.
 
-**Root cause at 100k**: attention is 1.44× slower in vLLM. GEMM is within 5%. The gap is SM120-native kernel quality, not paging overhead.
+Durable patterns to look for:
 
-Top kernel names:
-- TRT-LLM attention: `fmha_v2_flash_attention_e4m3_fp32_64_32_S_qkv_128_causal_sm120_kernel_nl`
-- vLLM attention: `BatchPrefillWithPagedKVCacheKernel` (FlashInfer)
+- **Many small kernel launches → latency-bound**: even if each individual launch is fast, kernel-launch overhead dominates. Look for >>thousands of launches per run.
+- **Few monolithic per-layer launches → compute- or memory-bound**: this is the healthy state. One large grid per layer saturates the SMs.
+- **High L2 throughput (>30%) means the kernel is reusing cache**, reducing the impact of larger per-token KV footprint.
+- **A well-tuned hardware-native kernel** can outperform an algorithmically-clever-but-less-tuned one (e.g. a hand-tuned GQA kernel beating a less-optimized MLA implementation, despite MLA's smaller KV).
