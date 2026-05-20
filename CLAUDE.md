@@ -36,6 +36,9 @@
 - **FP8 is the floor for KV cache on SM120**: nvfp4 KV cache is exposed in both frameworks' APIs but no FP4-input FMHA kernel ships for SM120 (datacenter SM100 is the only architecture with FP4-KV FMHA kernels). Verify on each upgrade.
 - **FP4 input only applies to GEMM activations** (W4A4 NVFP4). Q/K/V into the FMHA kernel are always FP8 (e4m3) — softmax precision is too sensitive for FP4 in the attention compute path.
 
+### Attention backends
+- When a vLLM attention backend rejects a model or underperforms, consult the per-backend compatibility matrix at `vllm-project/vllm/docs/design/attention_backends.md` (supported head sizes, Q/KV dtypes, GPU CC ranges) before switching backends or filing a bug.
+
 ### Chunked prefill / paged FMHA (TRT-LLM)
 - **Chunked prefill is disabled in both scripts**: chunked prefill requires `use_paged_context_fmha=True` (paged KV access in the attention kernel), which is slower than the default contiguous gather path. Only re-enable for multi-request batching or prefix caching.
 - **Contiguous KV cache would be faster in TRT-LLM** (via `enable_block_reuse=False` in KvCacheConfig), but we can't use it because `enable_block_reuse=True` is required for paged KV cache reuse across requests.
