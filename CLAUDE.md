@@ -29,11 +29,11 @@
 - **Check for newer vLLM and TRT-LLM versions once per session if it's been >24h since last check**. Use `pip index versions vllm` (system Python) and `pip index versions tensorrt-llm --pre` (in the trtllm conda env). Upgrade only after confirming with the user.
 - Blackwell GPUs require the NVIDIA **open kernel module** variant (the `-open` package), not the proprietary one. If `nvidia-smi` fails with "requires use of the NVIDIA open kernel modules" after a driver/kernel update, install the `-open` variant of the driver.
 
-## Optimization Lessons (RTX PRO 6000, SM120, prefill-heavy / 1-token output)
+## Optimization Lessons (Blackwell, prefill-heavy / 1-token output)
 
 ### Precision
 - **FP4 > FP8 on Blackwell**: Blackwell tensor cores have native FP4 support; FP4 weights/activations are faster than FP8 for GEMM-heavy workloads.
-- **FP8 is the floor for KV cache on SM120**: nvfp4 KV cache is exposed in both frameworks' APIs but no FP4-input FMHA kernel ships for SM120 (datacenter SM100 is the only architecture with FP4-KV FMHA kernels). Verify on each upgrade.
+- **KV-cache precision depends on SM and head_dim**: NVFP4 KV is exposed in both frameworks' APIs, but the FMHA cubin set is uneven — consumer Blackwell (SM120) has no FP4-input FMHA at all, and datacenter Blackwell (SM100/B200) ships FP4-KV cubins only for some head_dim/shape combinations (e.g. head_dim=512 has prefill cubins but not decode). When in doubt fall back to FP8 KV. Re-check after each FlashInfer/TRT-LLM upgrade — check the cubin manifest under `flashinfer_cubin/cubins/.../fmha/trtllm-gen/`. Check actual hardware with `nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader` before assuming.
 - **FP4 input only applies to GEMM activations** (W4A4 NVFP4). Q/K/V into the FMHA kernel are always FP8 (e4m3) — softmax precision is too sensitive for FP4 in the attention compute path.
 
 ### Attention backends
