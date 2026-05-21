@@ -27,6 +27,7 @@
 ## Daily Maintenance
 
 - **Check for newer vLLM and TRT-LLM versions once per session if it's been >24h since last check**. Use `pip index versions vllm` (system Python) and `pip index versions tensorrt-llm --pre` (in the trtllm conda env). Upgrade only after confirming with the user.
+- **After any vllm / flashinfer-python / triton upgrade**, diff the new versions against the version block at the top of each GPU section in `backend_compatibility.md` and run the `vllm-backend-matrix` skill on any GPU whose pinned versions are now stale. Even patch releases regularly change attention autotune defaults.
 - Blackwell GPUs require the NVIDIA **open kernel module** variant (the `-open` package), not the proprietary one. If `nvidia-smi` fails with "requires use of the NVIDIA open kernel modules" after a driver/kernel update, install the `-open` variant of the driver.
 
 ## Optimization Lessons (Blackwell, prefill-heavy / 1-token output)
@@ -38,6 +39,7 @@
 
 ### Attention backends
 - When a vLLM attention backend rejects a model or underperforms, consult the per-backend compatibility matrix at `vllm-project/vllm/docs/design/attention_backends.md` (supported head sizes, Q/KV dtypes, GPU CC ranges) before switching backends or filing a bug.
+- **For empirical "which backend on which GPU" decisions**, consult `backend_compatibility.md` at the repo root — measured latency at 100k input per (model × backend) for each GPU we've benchmarked. Regenerate via the `vllm-backend-matrix` skill when a row is stale (new vLLM version, new model, new GPU) or when a measurement contradicts the current table.
 
 ### Chunked prefill / paged FMHA (TRT-LLM)
 - **Chunked prefill is disabled in both scripts**: chunked prefill requires `use_paged_context_fmha=True` (paged KV access in the attention kernel), which is slower than the default contiguous gather path. Only re-enable for multi-request batching or prefix caching.

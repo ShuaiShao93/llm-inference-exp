@@ -17,6 +17,7 @@ Parse optional args: `--trtllm-cmd` and `--vllm-cmd` (the benchmark commands to 
 
 ## Key Caveats (Read First)
 
+- **Before profiling for "why is backend X slow", check `backend_compatibility.md`** at the repo root. If the table shows backend X is already known to be the worst on this GPU (e.g. TRITON_ATTN at long context on Hopper), the right answer may be "use a different backend" rather than "profile the kernel." Refresh the table via the `vllm-backend-matrix` skill if it's stale. Reserve the profile dive for cases where the table says backend X *should* be competitive but isn't.
 - **Both frameworks run GPU work in subprocesses**: `torch.profiler` in the main process won't capture GPU kernels. Use nsys with `--trace-fork-before-exec=true` to follow child processes.
 - **TRT-LLM requires `PYTHONNOUSERSITE=1`**: pass it via `env PYTHONNOUSERSITE=1 ...` since nsys takes the executable directly.
 - **Always warm up before profiling**: both scripts call `cudaProfilerStart()` after the warmup run, so nsys with `--capture-range=cudaProfilerApi` captures only the timed iterations.
