@@ -80,7 +80,14 @@ def _load_hf_config(model_id):
 def get_model_precision(model_id):
     """Return model's native precision as a short string (fp4, fp8, bf16, fp16, awq, gptq…)."""
     cfg = _load_hf_config(model_id)
-    qcfg = cfg.get("quantization_config", {})
+    # Multimodal models nest the quantization_config under text_config (or sometimes language_config).
+    qcfg = cfg.get("quantization_config") or {}
+    if not qcfg:
+        for k in ("text_config", "language_config"):
+            sub = cfg.get(k) or {}
+            qcfg = sub.get("quantization_config") or {}
+            if qcfg:
+                break
     fmt = qcfg.get("format", "").lower()
     method = qcfg.get("quant_method", "").lower()
 
@@ -90,6 +97,13 @@ def get_model_precision(model_id):
         return "fp8"
     if method in ("awq", "gptq", "bitsandbytes"):
         return method
+
+    if method == "modelopt":
+        algo = qcfg.get("quant_algo", "").upper()
+        if "NVFP4" in algo or "MXFP4" in algo or "FP4" in algo:
+            return "fp4"
+        if "FP8" in algo:
+            return "fp8"
 
     # compressed-tensors models: infer precision from config_groups weight num_bits
     if method == "compressed-tensors":
@@ -105,7 +119,7 @@ def get_model_precision(model_id):
             if bits == 8 and wtype == "int":
                 return "int8"
 
-    dtype = cfg.get("torch_dtype", "bfloat16")
+    dtype = cfg.get("torch_dtype") or cfg.get("text_config", {}).get("torch_dtype", "bfloat16")
     return {"bfloat16": "bf16", "float16": "fp16"}.get(dtype, dtype)
 
 

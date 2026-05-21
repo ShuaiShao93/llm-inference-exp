@@ -76,6 +76,7 @@ def run_one(
     num_runs: int,
     timeout_s: int,
     log_dir: Path,
+    tokenizer_mode: str = "auto",
 ) -> dict:
     """Run a single (model, backend, precision, kv) cell. Return result dict.
 
@@ -94,6 +95,7 @@ def run_one(
         "--input_tokens", str(input_tokens),
         "--max_output_tokens", "1",
         "--num_runs", str(num_runs),
+        "--tokenizer_mode", tokenizer_mode,
     ]
     env = {**os.environ, "CUDA_HOME": os.environ.get("CUDA_HOME", "/usr/local/cuda")}
     start = time.time()
@@ -160,12 +162,13 @@ def run_cell(
     num_runs: int,
     timeout_s: int,
     log_dir: Path,
+    tokenizer_mode: str = "auto",
 ) -> dict:
     """Try each precision tier in order until one succeeds. Return the result
     plus the (precision, kv) tuple that worked (or None if all failed)."""
     attempts = []
     for precision, kv in tiers:
-        r = run_one(model, backend, precision, kv, input_tokens, num_runs, timeout_s, log_dir)
+        r = run_one(model, backend, precision, kv, input_tokens, num_runs, timeout_s, log_dir, tokenizer_mode)
         attempts.append({"precision": precision, "kv": kv, **r})
         if r["status"] == "ok":
             return {"chosen": {"precision": precision, "kv": kv}, "attempts": attempts}
@@ -185,6 +188,8 @@ def main() -> int:
     ap.add_argument("--output", default="/tmp/vllm_backend_matrix.json",
                     help="JSON results path. The agent reads this to write the markdown.")
     ap.add_argument("--log_dir", default="/tmp/vllm_backend_matrix_logs")
+    ap.add_argument("--tokenizer_mode", default="auto",
+                    help="Pass-through to vllm_local.py (auto/mistral/slow). Set 'mistral' for Mistral/Ministral checkpoints with only tekken.json.")
     args = ap.parse_args()
 
     # GPU info
@@ -235,7 +240,7 @@ def main() -> int:
         for backend in args.backends:
             print(f"\n=== {model} × {backend} ===", file=sys.stderr)
             cell = run_cell(model, backend, tiers, args.input_tokens,
-                            args.num_runs, args.per_cell_timeout_s, log_dir)
+                            args.num_runs, args.per_cell_timeout_s, log_dir, args.tokenizer_mode)
             results["cells"][model][backend] = cell
             # Persist incrementally so a long run is recoverable
             Path(args.output).write_text(json.dumps(results, indent=2))

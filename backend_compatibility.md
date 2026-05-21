@@ -54,6 +54,34 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 ---
 
-## (Add tables for other GPUs here as they are measured.)
+## NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120, Consumer Blackwell)
 
-Empty for now. Run `vllm-backend-matrix` on the target GPU to populate.
+Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-05-21**.
+
+| Package | Version |
+|---|---|
+| `vllm` | 0.20.2 |
+| `flashinfer-python` | 0.6.8.post1 |
+| `flashinfer-cubin` | 0.6.8.post1 |
+| `triton` | 3.6.0 |
+| `flash-attn` | vendored in vllm (tracks vllm version) |
+
+If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
+
+| Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
+|---|---|---|---|---|
+| Gemma 4 E4B (`cosmicproc/gemma-4-E4B-it-NVFP4`) | ❌ head_size² | ❌ head_size not supported | **5024** | ❌ KV sharing not supported |
+| Llama 3.2 3B Instruct (local NVFP4, modelopt from `unsloth/Llama-3.2-3B-Instruct`) | **6422¹** | 6759 | 15432 | ❌ kv_cache_dtype not supported |
+| Ministral 3-3B Instruct (`Firworks/Ministral-3-3B-Instruct-2512-nvfp4`) | **7841¹** | 8195 | 17824 | ❌ kv_cache_dtype not supported |
+
+**Footnotes**:
+- ¹ FA's cute kernel asserts on Q dtype when KV cache is FP8 on SM120 → falls back to **BF16 KV cache** for this cell (`fp4 + auto KV`). All other working cells use FP8 KV. Despite using 2× the KV memory, FA still wins at 100k latency because its SM120 path is the most tuned. Watch for vllm/flashinfer updates that fix this assert.
+- ² FA doesn't work for Gemma 4 at *any* KV dtype on SM120 because Gemma 4's full-attention layers have `global_head_dim=512` (sliding-attention layers use 256). FA's SM120 build requires FA4 to support `head_size > 256`, which isn't available here. With FP8 KV the `kv_cache_dtype` check fires first; with BF16 KV the head_size check fires.
+
+**Notes**:
+- **FLASH_ATTN** is the default for Llama-family and Ministral-style dense GQA models — fastest where it works. Rejects Gemma 4 because of `global_head_dim=512` (needs FA4, not available on SM120).
+- **FLASHINFER** is the FP8-KV-respecting fallback for Llama/Ministral; ~5% slower than FA at 100k. Rejects Gemma 4 entirely (head_size).
+- **TRITON_ATTN** is the only backend that runs Gemma 4 here, and on Gemma 4 it's *faster* than FA/FlashInfer on the GQA models (sliding window helps). On standard GQA models it's 2-3× slower than FA.
+- **FLEX_ATTENTION** is unusable on SM120 at any of these models — kv_cache_dtype gate refuses FP8 KV; on Gemma 4 it additionally rejects KV-sharing.
+- Ministral 3-3B needs `--tokenizer_mode mistral` (Mistral's `tekken.json` only). The bench script passes this through when `--tokenizer_mode mistral` is set.
+- MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM backends are not applicable here.
