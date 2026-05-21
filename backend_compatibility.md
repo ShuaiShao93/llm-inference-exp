@@ -54,6 +54,39 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 ---
 
+## NVIDIA L40S 46GB (SM89, Ada)
+
+Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-05-21**.
+
+| Package | Version |
+|---|---|
+| `vllm` | 0.21.0 |
+| `flashinfer-python` | 0.6.8.post1 |
+| `flashinfer-cubin` | 0.6.8.post1 |
+| `triton` | 3.6.0 |
+| `flash-attn` | vendored in vllm (tracks vllm version) |
+
+If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
+
+| Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
+|---|---|---|---|---|
+| Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | ❌ head_size unsupported¹ | ❌ head_size=512 unsupported | **9114** | ❌ KV-sharing not supported² |
+| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | **11179³** | 12617 | 28094³ | ❌ OOM at 100k (BF16 KV) |
+| Ministral 3-3B Instruct (`unsloth/Ministral-3-3B-Instruct-2512-FP8`) | ❌ OOM | ❌ OOM | ❌ OOM | ❌ OOM |
+
+**Footnotes**:
+- ¹ On Ada, the vendored FA falls back to **FlashAttention v2** (the cute / FA4 path is Hopper+ only). FA2 doesn't support `head_dim=512`, so both the default FP8 KV cell and the BF16-KV fallback fail — unlike H100, where the FA-cute fallback handles Gemma 4 via BF16 KV.
+- ² FLEX_ATTENTION rejects FP8 KV; falling back to BF16 KV trips Gemma 4's sliding-window/global KV-sharing path which FlexAttention doesn't support.
+- ³ FA's cute kernel-path Q-dtype assert isn't reachable here (FA2 instead of FA4), but FA2 itself rejects FP8 KV for these models → falls back to **BF16 KV cache** for this cell. FLASHINFER's cell uses default FP8 KV.
+
+**Notes**:
+- **TRITON_ATTN is the only working backend for Gemma 4** on Ada (head_dim=512 has no FA2 / FlashInfer support).
+- For Llama 3.2 3B, FLASH_ATTN (with BF16-KV fallback) is the fastest, with FLASHINFER close behind at default FP8/FP8. TRITON_ATTN is ~2.5× slower.
+- **46 GB is tight at 100k context**: Ministral 3-3B OOMs across all four backends — the model is small but at vLLM's default `gpu_memory_utilization` plus a 100k KV cache the engine doesn't fit. Either drop `--max_model_len`, lower `--gpu_memory_utilization`, or use a smaller context for this model on L40S.
+- FLEX_ATTENTION is not viable at 100k on Ada for the same reasons as Hopper (metadata OOM on BF16-KV fallback) plus the FP8 KV rejection.
+
+---
+
 ## NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120, Consumer Blackwell)
 
 Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-05-21**.

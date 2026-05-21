@@ -86,7 +86,7 @@ def run_one(
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{model}__{backend}__{precision}__{kv}")
     logfile = log_dir / f"{safe}.log"
     cmd = [
-        "/usr/bin/python3.12",
+        sys.executable,
         str(VLLM_LOCAL),
         "--model", model,
         "--precision", precision,
