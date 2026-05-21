@@ -93,7 +93,7 @@ Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-05-
 
 | Package | Version |
 |---|---|
-| `vllm` | 0.20.2 |
+| `vllm` | 0.21.0 |
 | `flashinfer-python` | 0.6.8.post1 |
 | `flashinfer-cubin` | 0.6.8.post1 |
 | `triton` | 3.6.0 |
@@ -103,9 +103,9 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E4B (`cosmicproc/gemma-4-E4B-it-NVFP4`) | ❌ head_size² | ❌ head_size not supported | **5024** | ❌ KV sharing not supported |
-| Llama 3.2 3B Instruct (local NVFP4, modelopt from `unsloth/Llama-3.2-3B-Instruct`) | **6422¹** | 6759 | 15432 | ❌ kv_cache_dtype not supported |
-| Ministral 3-3B Instruct (`Firworks/Ministral-3-3B-Instruct-2512-nvfp4`) | **7841¹** | 8195 | 17824 | ❌ kv_cache_dtype not supported |
+| Gemma 4 E4B (`cosmicproc/gemma-4-E4B-it-NVFP4`) | ❌ head_size² | ❌ head_size not supported | **5010** | ❌ KV sharing not supported |
+| Llama 3.2 3B Instruct (local NVFP4, modelopt from `unsloth/Llama-3.2-3B-Instruct`) | **6378¹** | 6707 | 15433 | ❌ kv_cache_dtype not supported |
+| Ministral 3-3B Instruct (`Firworks/Ministral-3-3B-Instruct-2512-nvfp4`) | **7781¹** | 8145 | 17819 | ❌ kv_cache_dtype not supported |
 
 **Footnotes**:
 - ¹ FA's cute kernel asserts on Q dtype when KV cache is FP8 on SM120 → falls back to **BF16 KV cache** for this cell (`fp4 + auto KV`). All other working cells use FP8 KV. Despite using 2× the KV memory, FA still wins at 100k latency because its SM120 path is the most tuned. Watch for vllm/flashinfer updates that fix this assert.
