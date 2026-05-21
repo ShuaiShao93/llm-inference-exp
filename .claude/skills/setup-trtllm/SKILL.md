@@ -27,28 +27,9 @@ Parse optional args: `--env-name` (default: `trtllm`), `--trtllm-version` (defau
 
 ## Step 1: Upgrade CUDA
 
-TRT-LLM requires a recent CUDA toolkit. Check the TRT-LLM release notes for the minimum required version, then install via the NVIDIA apt repo.
+TRT-LLM requires a recent CUDA toolkit. Check the TRT-LLM release notes for the minimum required version, then run the **`upgrade-cuda`** skill to install it via the NVIDIA apt network repo. That skill covers the reboot requirement, PATH-shadowing traps on AWS DLAMI, and Blackwell `-open` driver caveats.
 
-Add the NVIDIA apt repo if not already present (get the correct `.deb` URL for your OS from https://developer.nvidia.com/cuda-downloads):
-
-```bash
-wget <cuda-keyring-deb-url>
-sudo dpkg -i cuda-keyring_*_all.deb
-sudo apt-get update
-```
-
-Install the required toolkit version (e.g. `cuda-toolkit-13-2`) alongside any existing CUDA without removing it:
-
-```bash
-sudo apt-get install -y cuda-toolkit-<major>-<minor>
-```
-
-Verify the right version is active:
-
-```bash
-nvcc --version
-ls /usr/local/cuda   # should symlink to the new version
-```
+If CUDA is already at or above the required version, skip to Step 2.
 
 ---
 
