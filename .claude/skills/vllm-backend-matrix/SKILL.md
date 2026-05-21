@@ -51,7 +51,11 @@ grep -B1 -A8 'NVIDIA' backend_compatibility.md | head -40
 
 Then diff the live versions against the version block in the matching GPU section of `backend_compatibility.md`:
 
-- **No GPU section yet for this hardware** → run the sweep (Step 2 onward).
+- **No GPU section yet for this hardware** → also check the OTHER GPU sections in the file: if any of them was measured against a *newer* `vllm` / `flashinfer-python` / `flashinfer-cubin` / `triton` than what's currently installed, **stop and prompt the user to upgrade first**. A matrix row measured on an older vLLM is misleading next to peers measured on a newer one. Quote the gap:
+
+  > "Existing rows in backend_compatibility.md (H100) were measured on `vllm==0.21.0`. Current env has `vllm==0.20.2`. Recommend upgrading vllm/flashinfer/triton via `pip install --upgrade vllm` (and `pip index versions vllm` to confirm latest) before populating the new GPU section. Otherwise the SM120 row will be on a different vLLM minor version than the H100 row and not comparable."
+
+  If the user confirms upgrade, do that first, then proceed with the sweep (Step 2 onward). Only skip the upgrade if the user explicitly says "use the current installed versions".
 - **GPU section exists, all versions match** → the table is current. If the user just wants to know which backend to use, read it off the table and stop. The empirical sweep is expensive (1-2h).
 - **GPU section exists, any version differs** → table is stale. Flag the drift to the user and recommend a refresh, naming which packages changed:
 

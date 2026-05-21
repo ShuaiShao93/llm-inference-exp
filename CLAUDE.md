@@ -26,7 +26,7 @@
 
 ## Daily Maintenance
 
-- **Check for newer vLLM and TRT-LLM versions once per session if it's been >24h since last check**. Use `pip index versions vllm` (system Python) and `pip index versions tensorrt-llm --pre` (in the trtllm conda env). Upgrade only after confirming with the user.
+- **Check for newer vLLM and TRT-LLM versions once per session if it's been >24h since last check, and ALWAYS before any benchmark run or `vllm-backend-matrix` invocation**. Use `pip index versions vllm` (system Python) and `pip index versions tensorrt-llm --pre` (in the trtllm conda env). Also diff the installed versions against the pinned-version blocks already in `backend_compatibility.md` — if any existing row was measured on a newer vllm/flashinfer/triton than what's currently installed, prompt the user to upgrade *first* so new rows are comparable to existing ones. Upgrade only after confirming with the user.
 - **After any vllm / flashinfer-python / triton upgrade**, diff the new versions against the version block at the top of each GPU section in `backend_compatibility.md` and run the `vllm-backend-matrix` skill on any GPU whose pinned versions are now stale. Even patch releases regularly change attention autotune defaults.
 - Blackwell GPUs require the NVIDIA **open kernel module** variant (the `-open` package), not the proprietary one. If `nvidia-smi` fails with "requires use of the NVIDIA open kernel modules" after a driver/kernel update, install the `-open` variant of the driver.
 
