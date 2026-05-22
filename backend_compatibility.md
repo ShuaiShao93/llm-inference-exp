@@ -118,3 +118,44 @@ If any of these has a newer release, the table below is likely stale — rerun t
 - **FLEX_ATTENTION** is unusable on SM120 at any of these models — kv_cache_dtype gate refuses FP8 KV; on Gemma 4 it additionally rejects KV-sharing.
 - Ministral 3-3B needs `--tokenizer_mode mistral` (Mistral's `tekken.json` only). The bench script passes this through when `--tokenizer_mode mistral` is set.
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM backends are not applicable here.
+
+---
+
+## NVIDIA B200 180GB HBM3e (SM100, Datacenter Blackwell)
+
+Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-05-22**.
+
+| Package | Version |
+|---|---|
+| `vllm` | 0.21.0 + 2 local patches (see §) |
+| `flashinfer-python` | 0.6.11.post3 |
+| `flashinfer-cubin` | 0.6.11.post3 |
+| `triton` | 3.6.0 |
+| `flash-attn` | vendored in vllm (tracks vllm version) |
+
+If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
+
+**Version-drift note:** `flashinfer-python` / `flashinfer-cubin` are **newer** than the 0.6.8.post1 used in the H100, L40S, and SM120 sections above. The upgrade was required for `head_dim=512` cubin coverage ([flashinfer#2959](https://github.com/flashinfer-ai/flashinfer/pull/2959)). Cross-GPU comparisons against the older sections are not strictly apples-to-apples until those sections are refreshed against the newer flashinfer release on their hardware.
+
+**vLLM local patches in effect for these numbers** (both in `vllm/v1/attention/backends/flashinfer.py`):
+1. [vllm#38822](https://github.com/vllm-project/vllm/pull/38822) — `head_dim=512` added to `FlashInferBackend.get_supported_head_sizes()`. Unblocks Gemma 4 full-attention layers from reaching the FlashInfer call.
+2. uint8 → `torch.float8_e4m3fn` view bridge in `FlashInferImpl.forward` right after `kv_cache_permute = fixed`. vLLM stores FP8 KV with uint8 backing; since flashinfer#2954, the trtllm-gen kernels treat uint8 unambiguously as NVFP4 and raise `kv_cache_sf must be provided for NVFP4 KV cache.` Other vLLM v1 backends already do this view (`triton_attn.py:570-571`, `rocm_attn.py:416-417`, `rocm_aiter_unified_attn.py:204-205`); FlashInfer was the only one missing it. Without this patch, every FLASHINFER cell here (and on any GPU with flashinfer ≥ 0.6.11 and FP8 KV) would fail.
+
+| Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
+|---|---|---|---|---|
+| Gemma 4 E4B (`cosmicproc/gemma-4-E4B-it-NVFP4`) | ❌ kv_cache_dtype not supported² | **913³** | 9781 | ❌ kv_cache_dtype not supported |
+| Llama 3.2 3B Instruct (`inference-optimization/Llama-3.2-3B-Instruct-NVFP4`) | 1643¹ | **1275** | 22705 | ❌ kv_cache_dtype not supported |
+| Ministral 3-3B Instruct (`Firworks/Ministral-3-3B-Instruct-2512-nvfp4`) | 1944¹ | **1500** | 26091 | ❌ kv_cache_dtype not supported |
+
+**Footnotes**:
+- ¹ FA's cute (FA4) kernel asserts on Q dtype when KV cache is FP8 on Blackwell → falls back to **BF16 KV cache** (`fp4 + auto KV`). All other working cells use FP8 KV. Same SM120 footnote ¹ pattern — the assert hasn't been fixed in vLLM 0.21.0.
+- ² FA doesn't work for Gemma 4 at *any* KV dtype on B200 either: `head_dim=512` plus FP8 KV trips the kv_cache_dtype check; FA4 supports head_size up to 512 on SM100 but the FP8-KV gate fires first. With BF16 KV fallback the head-size check would clear, but FA's KV-sharing handling for Gemma 4's sliding/global mix doesn't apply here — same architectural mismatch as on SM120.
+- ³ FLASHINFER on Gemma 4 only works with **both** local vLLM patches above. Without #38822 it fails at backend selection (head_size 512); without the uint8-view bridge it fails at first kernel dispatch with `kv_cache_sf must be provided for NVFP4 KV cache.` The kernel actually used is `fmhaSm100fKernel_QkvE4m3OBfloat16H512HVPerCta256PagedKvCausalP16VarSeqQ128Kv128PersistentContext` (split-CTA, per-CTA-V=256 — see the `benchmark-gemma4` skill for why head_dim=512 attention is ~2.4× the cost of head_dim=256).
+
+**Notes**:
+- **FLASHINFER is the default on B200** for all three models tested — beats FLASH_ATTN by 20-30% on Llama/Ministral, and is the only viable option for Gemma 4 (after patches). This is the opposite of SM120, where FA wins on GQA models; the inversion comes from FlashInfer 0.6.11's SM100 trtllm-gen tuning being further along than FA4's SM100 path for these shapes.
+- **FLASH_ATTN** still works on Llama/Ministral but pays the BF16-KV memory tax. Rejects Gemma 4 outright. Same Q-dtype assert as SM120 — watch for vllm 0.22 / flashinfer upgrades.
+- **TRITON_ATTN** is 7-17× slower than FLASHINFER on B200 — only useful as a correctness baseline. Works on every model including Gemma 4.
+- **FLEX_ATTENTION** is unusable for the same kv_cache_dtype reason as SM120.
+- B200 has plenty of HBM (180 GB), so OOM is not a constraint at 100k context for these models, unlike L40S (46 GB).
+- MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM backends are not applicable here.
