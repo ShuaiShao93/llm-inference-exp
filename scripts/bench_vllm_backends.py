@@ -60,10 +60,17 @@ def detect_precision_tiers(compute_cap: str) -> list[tuple[str, str]]:
             ("fp8", "fp8"),
             ("fp8", "auto"),
         ]
-    # Hopper / Ada
+    if cc >= 8.9:
+        # Hopper / Ada — native FP8 tensor cores.
+        return [
+            ("fp8", "fp8"),
+            ("fp8", "auto"),
+        ]
+    # Ampere (SM 8.0/8.6) — no native FP8/FP4 tensor cores, but INT8 tensor
+    # cores are available (added in Turing SM 7.5). W8A8 INT8 is the natural
+    # quantized default; "auto" KV picks the model's compute dtype (typ. BF16).
     return [
-        ("fp8", "fp8"),
-        ("fp8", "auto"),
+        ("int8", "auto"),
     ]
 
 

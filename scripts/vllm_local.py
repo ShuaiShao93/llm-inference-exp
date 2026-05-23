@@ -128,6 +128,7 @@ def check_precision(model_id, requested):
     if requested == "auto":
         return
     model_precision = get_model_precision(model_id)
+    model_precision = _DTYPE_ALIASES.get(model_precision, model_precision)
     if model_precision != requested:
         sys.exit(
             f"Error: requested precision '{requested}' does not match "
@@ -170,8 +171,8 @@ def main():
         }
 
     # Only set explicit quantization for vLLM-managed methods (awq, gptq, …)
-    # fp4/fp8 are embedded in the model config and auto-detected by vLLM
-    if precision not in _DTYPE_VALUES and precision not in ("fp4", "fp8", "auto"):
+    # fp4/fp8/int8 are embedded in the model config and auto-detected by vLLM
+    if precision not in _DTYPE_VALUES and precision not in ("fp4", "fp8", "int8", "auto"):
         llm_kwargs["quantization"] = precision
         llm_kwargs["dtype"] = "auto"
     elif precision in _DTYPE_VALUES:

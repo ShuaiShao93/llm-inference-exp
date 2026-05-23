@@ -88,6 +88,26 @@ The FlashInfer 0.6.11 cubin set for `head_dim=512 + KvE2m1 (NVFP4)` only ships *
 
 On consumer Blackwell (SM120) the situation is worse — no `Sm120` cubins exist at all in the trtllm-gen FMHA tree, regardless of head_dim or KV dtype. Use a different backend there.
 
+### Pre-Hopper (Ampere SM 8.x, Turing SM 7.5): INT8 W8A8
+
+GPUs without native FP8 tensor cores (anything below SM 8.9) can't usefully run the FP4/FP8 checkpoints above — those paths fall back to BF16 dequant and waste tensor-core throughput. The right precision is **INT8 W8A8** (CompressedTensors `int-quantized`), which engages the INT8 IMMA tensor cores that have shipped since Turing.
+
+**Don't try to quantize Gemma 4 to INT8 W8A8 locally** with `auto-round` or `llm-compressor`. Both tools calibrate block-by-block, feeding each transformer block its cached input from the previous block's output. Gemma 4's heterogeneous `head_dim` (256 on sliding-window layers, 512 on global-attention layers) means the rotary `cos`/`sin` tensors materialized during the first sliding layer don't match the shape expected by the next global layer — calibration crashes with `RuntimeError: The size of tensor a (512) must match the size of tensor b (256) at non-singleton dimension 3` inside `apply_rotary_pos_emb`. The model's own forward pass dispatches the right rotary per layer; the per-block calibration loop bypasses that dispatch. Same shape mismatch that breaks A4B → FlashInfer at backend-selection time, just surfaced in a different tool.
+
+The practical option is a **pre-quantized community W8A8 INT8 checkpoint** (e.g. `nunusadmqk/gemma-4-E4B-it-W8A8-INT8-v10-datafree`). "Datafree" means RTN — no calibration data — which costs some accuracy but doesn't affect latency benchmarks at all; the kernel choice and compute pattern are identical to a GPTQ-calibrated checkpoint.
+
+On Ampere, only **TRITON_ATTN** survives Gemma 4's `head_dim=512` global layers — `FLASH_ATTN` uses FA2 here (the cute / FA4 path is Hopper+) and FA2 rejects `head_dim>256`; FlashInfer's Ampere head-size set also tops out below 512. Same backend-availability pattern as the L40S section in `backend_compatibility.md`.
+
+```bash
+/usr/bin/python3.12 scripts/vllm_local.py \
+    --model nunusadmqk/gemma-4-E4B-it-W8A8-INT8-v10-datafree \
+    --precision int8 --kv_cache_precision auto \
+    --attention_backend TRITON_ATTN \
+    --input_tokens 100000 --max_output_tokens 1
+```
+
+`kv_cache_precision=auto` resolves to BF16 here (the model's compute dtype) since vLLM's FP8 KV path requires SM ≥ 8.9.
+
 ### A4B-specific: `use_bidirectional_attention="vision"` blocks FlashInfer
 
 Even after the patches above, A4B will fail backend selection with:

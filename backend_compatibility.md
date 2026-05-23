@@ -159,3 +159,44 @@ If any of these has a newer release, the table below is likely stale — rerun t
 - **FLEX_ATTENTION** is unusable for the same kv_cache_dtype reason as SM120.
 - B200 has plenty of HBM (180 GB), so OOM is not a constraint at 100k context for these models, unlike L40S (46 GB).
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM backends are not applicable here.
+
+---
+
+## NVIDIA A100 SXM4 40GB (SM80, Ampere)
+
+Default precision: **INT8 W8A8 weights + BF16 KV cache**. Last measured **2026-05-23**.
+
+| Package | Version |
+|---|---|
+| `vllm` | 0.21.0 |
+| `flashinfer-python` | 0.6.11.post3 |
+| `flashinfer-cubin` | 0.6.11.post3 |
+| `triton` | 3.6.0 |
+| `flash-attn` | vendored in vllm (tracks vllm version) |
+
+If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
+
+**Version-drift note:** `flashinfer-python` / `flashinfer-cubin` 0.6.11.post3 here matches the B200 section; H100, L40S, and SM120 sections were measured on the older 0.6.8.post1 and should be refreshed before cross-GPU comparisons against this row.
+
+**Precision-drift note:** Ampere has **no native FP8 or FP4 tensor cores** — those paths would fall back to BF16 dequant and defeat the point. INT8 tensor cores have been available since Turing (SM 7.5), so W8A8 INT8 (CompressedTensors `int-quantized`) is the natural quantized baseline. `kv_cache_dtype=auto` resolves to **BF16** here (the model's compute dtype); vLLM's FP8 KV path requires an FP8-capable SM (≥ 8.9).
+
+| Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
+|---|---|---|---|---|
+| Gemma 4 E4B (`nunusadmqk/gemma-4-E4B-it-W8A8-INT8-v10-datafree`) | ❌ head_size unsupported¹ | ❌ head_size=512 unsupported | **21101** | ❌ KV-sharing not supported |
+| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-quantized.w8a8`) | **11666** | ❌ OOM² | 41059 | ❌ OOM² |
+| Ministral 3-3B Instruct (`Ministral-3-3B-Instruct-2512-w8a8`, locally quantized³) | ❌ OOM⁴ | ❌ OOM⁴ | ❌ OOM⁴ | ❌ OOM⁴ |
+
+**Footnotes**:
+- ¹ On Ampere, the vendored FA uses **FlashAttention v2** (FA-cute / FA4 are Hopper+). FA2 rejects `head_dim>256`, so Gemma 4's global-attention layers (`head_dim=512`) trip the head-size check. Same pattern as the L40S section. FLASHINFER rejects for the same reason on this SM.
+- ² FLASHINFER and FLEX_ATTENTION OOM for Llama 3.2 3B on the 40 GB A100 with flashinfer **0.6.11.post3**. The earlier measurement on flashinfer 0.6.8.post1 had FLASHINFER passing at ~10.7 s; the 0.6.11 upgrade added enough workspace bulk to push FLASHINFER over the 40 GB budget at 100k context (FA still fits because it doesn't preallocate the same prefill workspace). On 80 GB A100 or with `--gpu_memory_utilization` lowered, FLASHINFER would likely run again.
+- ³ Ministral 3-3B's published checkpoints are FP8/NVFP4; the Mistral-recommended W8A8 INT8 quantization for this revision had to be produced locally with `auto-round` against the BF16 base `unsloth/Ministral-3-3B-Instruct-2512` (RTN mode — calibration doesn't affect latency-only benchmarks).
+- ⁴ Ministral 3-3B is a `Mistral3ForConditionalGeneration` **multimodal** model — its vision tower stays BF16 (only the language-model linear layers are quantized to INT8). The unquantized vision-tower bulk plus 100k-context KV cache for the text model overflows 40 GB on every backend. On 80 GB A100 this row should look more like the H100/B200 rows.
+
+**Notes**:
+- **FLASH_ATTN is the default on A100** for W8A8 INT8 long-context prefill where the model fits — Llama 3.2 3B is the only row that completed at default config. FA2 keeps a smaller workspace than FLASHINFER 0.6.11, which is what saves it on the 40 GB card.
+- **FLASHINFER** would be the natural choice on a larger A100 (80 GB) — the kernel itself runs fine; only the workspace allocation OOMs on 40 GB after the 0.6.11 upgrade.
+- **TRITON_ATTN** is the universal fallback — works on every model that fits, including Gemma 4 (the only working backend for `head_dim=512` on Ampere). ~3.5× slower than FA on Llama 3.2 3B at long context.
+- **FLEX_ATTENTION** is unusable at 100k on a 40 GB Ampere GPU: rejects Gemma 4's sliding/global KV-sharing, OOMs on the dense models. Same pattern as the H100 (80 GB) section where FLEX OOMs even with more headroom.
+- **40 GB is the binding constraint** for this row — three of four backends OOM on the dense Llama 3.2 3B, and Ministral OOMs across the board. The matrix would be much more readable on an 80 GB A100; rows here primarily document what vLLM rejects vs. what just doesn't fit.
+- **INT8 W8A8 vs other quant schemes**: vLLM picks `CutlassInt8ScaledMMLinearKernel` for the matmul; attention runs in BF16 against the BF16 KV cache. INT8 activations are quantized per-token dynamically (the `int-quantized` strategy with `act_group_size=-1`).
+- MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM backends are not applicable here.
