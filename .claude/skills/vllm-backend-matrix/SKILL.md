@@ -84,7 +84,7 @@ Add an MoE if you have one cached (Gemma 4 A4B, DeepSeek-V2-Lite, etc.) to surfa
 
 ## Step 3: Run the sweep
 
-Every benchmark in this skill runs with a LoRA adapter loaded. The LoRA per model is pinned in the "LoRA adapters used for every benchmark" table at the top of `backend_compatibility.md` — read it before invoking the script and pass each mapping via `--lora MODEL=LORA_HF_ID`. Failing to load the LoRA is a benchmark failure (not silently skipped) so we catch it explicitly.
+Every benchmark in this skill runs with a LoRA adapter loaded. All adapters are pinned at **r=16, alpha=16** targeting the 7 standard projection modules (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `up_proj`, `gate_proj`, `down_proj`) so LoRA compute shape is constant across models. The per-model adapter mapping is pinned in the "LoRA adapters used for every benchmark" table at the top of `backend_compatibility.md` — read it before invoking the script and pass each mapping via `--lora MODEL=LORA_HF_ID_OR_LOCAL_PATH`. Failing to load the LoRA is a benchmark failure (not silently skipped) so we catch it explicitly.
 
 ```bash
 CUDA_HOME=/usr/local/cuda /usr/bin/python3.12 scripts/bench_vllm_backends.py \
@@ -93,12 +93,12 @@ CUDA_HOME=/usr/local/cuda /usr/bin/python3.12 scripts/bench_vllm_backends.py \
   --model unsloth/Ministral-3-3B-Instruct-2512-FP8 \
   --backends FLASH_ATTN FLASHINFER TRITON_ATTN FLEX_ATTENTION \
   --lora prithivMLmods/gemma-4-E4B-it-FP8=Semaj90/gemma4-e4b-legal-grpo \
-  --lora RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic=SidhaarthMurali/llama3.2-3b-math-ig \
-  --lora unsloth/Ministral-3-3B-Instruct-2512-FP8=aswin00000/construction-safety-ministral3b-lora \
+  --lora RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic=$HOME/model_ckpt/synthetic-loras/llama-3.2-3b-r16 \
+  --lora unsloth/Ministral-3-3B-Instruct-2512-FP8=$HOME/model_ckpt/synthetic-loras/ministral-3-3b-r16 \
   --output /tmp/vllm_backend_matrix.json
 ```
 
-If you're adding a new model, find a clean LoRA for it first (HF search: `lora` filter + base model name; check `adapter_config.json` for `target_modules ⊇ {q,k,v,o,up,gate,down}_proj`, no `modules_to_save`, no `use_dora`, no `use_rslora`, no multimodal tower targets), smoke-test it once, then add the mapping both to the matrix's LoRA table and to your sweep invocation.
+If you're adding a new model, first try HF search for an existing adapter at r=16/α=16 (filter: `lora` tag + base model name; check `adapter_config.json` for `target_modules ⊇ {q,k,v,o,up,gate,down}_proj`, no `modules_to_save`, no `use_dora`, no `use_rslora`, no multimodal tower targets). If nothing on HF matches, **generate a synthetic one** via `scripts/build_synthetic_lora.py` (random weights, but identical compute shape). Smoke-test once, then add the mapping to both the matrix's LoRA table and the sweep invocation.
 
 This runs `N_models × N_backends × tiers-until-one-works` cells. With 4 backends and tiers averaging ~1.5 attempts per cell, expect roughly `4 × 1.5 = 6` runs per model. Each run is one full vLLM engine init + 5 timed iterations at 100k context — usually 2-5 minutes per cell, longer for larger models. A 3-model × 4-backend sweep on H100 is roughly 1-2 hours wall clock.
 

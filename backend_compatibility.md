@@ -22,47 +22,63 @@ Run the `vllm-backend-matrix` skill when any of these change:
 
 ## LoRA adapters used for every benchmark
 
-Each model in the matrix is benchmarked with a representative LoRA adapter loaded, so the cells exercise the backend's LoRA dispatch path (closer to production deployment than a no-LoRA baseline). The same LoRA per model is used across every GPU table for consistency. Pick replacements that target the same module set (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `up_proj`, `gate_proj`, `down_proj`) so rank/alpha is the only variable that changes.
+Each model in the matrix is benchmarked with a LoRA adapter loaded, so the cells exercise the backend's LoRA dispatch path (closer to production deployment than a no-LoRA baseline). All adapters are pinned at **rank 16, alpha 16**, targeting the 7 standard projection modules (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `up_proj`, `gate_proj`, `down_proj`) so the LoRA compute shape is identical across models and only the base architecture varies.
 
-| Base model | LoRA adapter | r / α | Notes |
+| Base model | LoRA adapter | r / α | Source |
 |---|---|---|---|
-| `prithivMLmods/gemma-4-E4B-it-FP8` (Gemma 4 E4B) | `Semaj90/gemma4-e4b-legal-grpo` | 16 / 16 | Excludes `vision_tower.*`, `audio_tower.*`, `multi_modal_projector.*` — required for Gemma 4's multimodal towers which vLLM doesn't expose for LoRA. |
-| `RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic` (Llama 3.2 3B) | `SidhaarthMurali/llama3.2-3b-math-ig` | 8 / 16 | Trained on `meta-llama/Llama-3.2-3B-Instruct`. Standard 7-module targets. |
-| `unsloth/Ministral-3-3B-Instruct-2512-FP8` (Ministral 3-3B) | `aswin00000/construction-safety-ministral3b-lora` | 32 / 64 | Trained on `mistralai/Ministral-3-3B-Instruct-2512`. Standard 7-module targets. |
+| `prithivMLmods/gemma-4-E4B-it-FP8` (Gemma 4 E4B) | `Semaj90/gemma4-e4b-legal-grpo` | 16 / 16 | HF (real). Excludes `vision_tower.*`, `audio_tower.*`, `multi_modal_projector.*`. |
+| `RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic` (Llama 3.2 3B) | `~/model_ckpt/synthetic-loras/llama-3.2-3b-r16` | 16 / 16 | Synthetic (built by `scripts/build_synthetic_lora.py`; random weights). |
+| `unsloth/Ministral-3-3B-Instruct-2512-FP8` (Ministral 3-3B) | `~/model_ckpt/synthetic-loras/ministral-3-3b-r16` | 16 / 16 | Synthetic (built by `scripts/build_synthetic_lora.py`; random weights, towers excluded). |
+
+The Gemma 4 row uses a real HF adapter because PEFT can't currently wrap Gemma 4's `Gemma4ClippableLinear` (raises *"Target module ... is not supported"*); the existing `Semaj90` adapter happens to be at r=16/α=16 with the right module set already, so we keep it.
+
+To regenerate the synthetic adapters (e.g. when a base model is replaced), run:
+
+```bash
+/usr/bin/python3.12 scripts/build_synthetic_lora.py \
+  --base RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic \
+  --out ~/model_ckpt/synthetic-loras/llama-3.2-3b-r16
+/usr/bin/python3.12 scripts/build_synthetic_lora.py \
+  --base unsloth/Ministral-3-3B-Instruct-2512-FP8 \
+  --out ~/model_ckpt/synthetic-loras/ministral-3-3b-r16
+```
+
+Synthetic-weight performance is identical to real-weight performance (LoRA dispatch only cares about r/α/target_modules, not the weight values), so this lets us match `r/α` across models without hunting for an HF adapter at every desired rank.
 
 ---
 
 ## NVIDIA H100 80GB HBM3 (SM90, Hopper)
 
-Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-05-21**.
+Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-05-28**.
 
 | Package | Version |
 |---|---|
 | `vllm` | 0.21.0 |
-| `flashinfer-python` | 0.6.8.post1 |
-| `flashinfer-cubin` | 0.6.8.post1 |
-| `triton` | 3.6.0 |
+| `flashinfer-python` | 0.6.11.post3 |
+| `flashinfer-cubin` | 0.6.11.post3 |
+| `triton` | 3.7.0 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
-| `cuda-driver` | _(not recorded — rerun matrix on this GPU to capture)_ |
-| `cuda-toolkit` | _(not recorded — rerun matrix on this GPU to capture)_ |
+| `cuda-driver` | 610.43.02 |
+| `cuda-toolkit` | 13.3 |
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | **2973¹** | ❌ head_size=512 unsupported | 8212² | ❌ KV-sharing not supported |
-| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | **3506** | 9744 | 27298 | ❌ OOM at 100k (BF16 KV) |
-| Ministral 3-3B Instruct (`unsloth/Ministral-3-3B-Instruct-2512-FP8`) | **3997** | 11840 | 31443 | ❌ OOM expected (BF16 KV) |
+| Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | **3719¹** | ❌ head_size=512 unsupported | 9003² | ❌ FP8 KV cache unsupported |
+| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | **3994** | 10168 | 26078 | ❌ FP8 KV cache unsupported |
+| Ministral 3-3B Instruct (`unsloth/Ministral-3-3B-Instruct-2512-FP8`) | **4463** | 12223 | 28873 | ❌ FP8 KV cache unsupported |
 
 **Footnotes**:
 - ¹ FA's cute (FA4) path on Gemma 4 (`head_dim=512`) asserts `q.dtype in [fp16, bf16]` when KV cache is FP8 → falls back to **BF16 KV cache** for this cell. All other cells use FP8 KV.
-- ² TRITON_ATTN result reflects the tuning from [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) (`num_warps=8, num_stages=2, TILE_SIZE=64` gated on `head_dim≥512`). Pre-PR baseline was 12259 ms.
+- ² TRITON_ATTN result reflects the tuning from [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) (`num_warps=8, num_stages=2, TILE_SIZE=64` gated on `head_dim≥512`).
 
 **Notes**:
-- FLASH_ATTN is the default to reach for on Hopper FP8 workloads — 2-9× faster than the alternatives across every working configuration.
+- All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard projection modules). See the "LoRA adapters used for every benchmark" table near the top of this file. Comparable no-LoRA numbers from the previous matrix run (vllm 0.21.0 + flashinfer 0.6.8 + triton 3.6 + driver 595 + toolkit 13.2) were E4B-FA 2973 ms / E4B-TRITON 8212 ms; Llama-FA 3506 / Llama-FLASHINFER 9744 / Llama-TRITON 27298; Ministral-FA 3997 / Ministral-FLASHINFER 11840 / Ministral-TRITON 31443. LoRA dispatch adds ~5-25% on FA-class backends and is roughly flat on the slower backends.
+- FLASH_ATTN is the default to reach for on Hopper FP8 workloads — 2.3-6.5× faster than the alternatives across every working configuration here.
 - FLASHINFER is the fallback when FA rejects the shape (head_dim, mask combos, …). On Hopper today it underperforms FA significantly at long context.
-- TRITON_ATTN is the last-resort fallback. Useful when both FA and FlashInfer reject the model (Gemma 4 + FP8 KV is the canonical case).
-- FLEX_ATTENTION is not viable at 100k context — heavy metadata (block-mask building) OOMs even when the kernel itself would work.
+- TRITON_ATTN is the last-resort fallback. Useful when both FA and FlashInfer reject the model (Gemma 4 + FP8 KV is the canonical case — FA falls back to BF16 KV there, TRITON_ATTN is needed if you must keep FP8 KV).
+- FLEX_ATTENTION uniformly rejects FP8 KV cache on this stack (it doesn't enter the backend, so the previously-seen "OOM at 100k" failure mode never materializes here). Not viable for FP8-KV deployments on H100.
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM (`SHORT_CONV`, `LINEAR`, `GDN_ATTN`) backends are not applicable to standard dense LLMs on NVIDIA datacenter GPUs.
 
 ---
