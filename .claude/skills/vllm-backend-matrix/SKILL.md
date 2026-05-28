@@ -39,17 +39,23 @@ Override the tier list by editing `detect_precision_tiers()` in the helper scrip
 ## Step 1: Check current state + version drift
 
 ```bash
-nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader
+/usr/local/cuda/bin/nvcc --version | tail -3
 /usr/bin/python3.12 -c "
 import importlib.metadata as md
 for p in ['vllm', 'flashinfer-python', 'flashinfer-cubin', 'triton']:
     try:    print(f'{p}: {md.version(p)}')
     except: print(f'{p}: not installed')
 "
-grep -B1 -A8 'NVIDIA' backend_compatibility.md | head -40
+grep -B1 -A10 'NVIDIA' backend_compatibility.md | head -60
 ```
 
-Then diff the live versions against the version block in the matching GPU section of `backend_compatibility.md`:
+Then diff the live versions against the version block in the matching GPU section of `backend_compatibility.md`. The version block tracks:
+
+- pip packages: `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`
+- system: `cuda-driver` (from `nvidia-smi --query-gpu=driver_version`), `cuda-toolkit` (from `nvcc --version`)
+
+(`flash-attn` is vendored inside vllm and tracks the vllm version; no separate check.)
 
 - **No GPU section yet for this hardware** → also check the OTHER GPU sections in the file: if any of them was measured against a *newer* `vllm` / `flashinfer-python` / `flashinfer-cubin` / `triton` than what's currently installed, **stop and prompt the user to upgrade first**. A matrix row measured on an older vLLM is misleading next to peers measured on a newer one. Quote the gap:
 
@@ -59,9 +65,11 @@ Then diff the live versions against the version block in the matching GPU sectio
 - **GPU section exists, all versions match** → the table is current. If the user just wants to know which backend to use, read it off the table and stop. The empirical sweep is expensive (1-2h).
 - **GPU section exists, any version differs** → table is stale. Flag the drift to the user and recommend a refresh, naming which packages changed:
 
-  > "The matrix for H100 was measured against `vllm==0.21.0 / flashinfer==0.6.8.post1 / triton==3.6.0`. Current env has `vllm==0.22.0`. Recommend refreshing — kernel autotune defaults often change between vLLM minor versions."
+  > "The matrix for H100 was measured against `vllm==0.21.0 / flashinfer==0.6.8.post1 / triton==3.6.0 / cuda-driver==595.71.05 / cuda-toolkit==13.2`. Current env has `vllm==0.22.0` and `cuda-driver==610.43.02`. Recommend refreshing — vLLM minor bumps change attention autotune defaults, and CUDA driver/toolkit bumps trigger flashinfer cubin redownloads and can change JIT kernel codegen."
 
   Proceed with the sweep if the user confirms.
+
+  CUDA driver/toolkit upgrades are the most disruptive: they invalidate the entire flashinfer cubin cache (`~/.local/lib/python3.12/site-packages/flashinfer_cubin/cubins/`) and trigger re-download on next use. Always rerun the matrix on the affected GPU after a driver or toolkit bump, not just after pip upgrades. See the `upgrade-cuda` skill for the upgrade procedure.
 
 ## Step 2: Pick the model set
 
@@ -76,14 +84,21 @@ Add an MoE if you have one cached (Gemma 4 A4B, DeepSeek-V2-Lite, etc.) to surfa
 
 ## Step 3: Run the sweep
 
+Every benchmark in this skill runs with a LoRA adapter loaded. The LoRA per model is pinned in the "LoRA adapters used for every benchmark" table at the top of `backend_compatibility.md` — read it before invoking the script and pass each mapping via `--lora MODEL=LORA_HF_ID`. Failing to load the LoRA is a benchmark failure (not silently skipped) so we catch it explicitly.
+
 ```bash
 CUDA_HOME=/usr/local/cuda /usr/bin/python3.12 scripts/bench_vllm_backends.py \
   --model prithivMLmods/gemma-4-E4B-it-FP8 \
   --model RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic \
   --model unsloth/Ministral-3-3B-Instruct-2512-FP8 \
   --backends FLASH_ATTN FLASHINFER TRITON_ATTN FLEX_ATTENTION \
+  --lora prithivMLmods/gemma-4-E4B-it-FP8=Semaj90/gemma4-e4b-legal-grpo \
+  --lora RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic=SidhaarthMurali/llama3.2-3b-math-ig \
+  --lora unsloth/Ministral-3-3B-Instruct-2512-FP8=aswin00000/construction-safety-ministral3b-lora \
   --output /tmp/vllm_backend_matrix.json
 ```
+
+If you're adding a new model, find a clean LoRA for it first (HF search: `lora` filter + base model name; check `adapter_config.json` for `target_modules ⊇ {q,k,v,o,up,gate,down}_proj`, no `modules_to_save`, no `use_dora`, no `use_rslora`, no multimodal tower targets), smoke-test it once, then add the mapping both to the matrix's LoRA table and to your sweep invocation.
 
 This runs `N_models × N_backends × tiers-until-one-works` cells. With 4 backends and tiers averaging ~1.5 attempts per cell, expect roughly `4 × 1.5 = 6` runs per model. Each run is one full vLLM engine init + 5 timed iterations at 100k context — usually 2-5 minutes per cell, longer for larger models. A 3-model × 4-backend sweep on H100 is roughly 1-2 hours wall clock.
 
@@ -104,7 +119,7 @@ The JSON output schema (per cell):
 For each GPU table in `backend_compatibility.md`:
 
 1. **Header**: GPU name + compute capability + default precision (= first tier tried) + last-measured date.
-2. **Version block** immediately under the header: a small table of `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton` versions from the JSON's `versions` field, plus a one-line note that `flash-attn` is vendored in vllm. Future runs of this skill diff against this block to detect drift.
+2. **Version block** immediately under the header: a small table of `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`, `cuda-driver`, `cuda-toolkit` versions from the JSON's `versions` field, plus a one-line note that `flash-attn` is vendored in vllm. Future runs of this skill diff against this block to detect drift.
 3. **Rows**: models, formatted as ``Friendly name (`hf-id`)``.
 4. **Columns**: backends.
 5. **Cells**:

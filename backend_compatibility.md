@@ -13,11 +13,22 @@ Empirical compatibility and latency data for vLLM attention backends at **100k i
 ## When to regenerate this file
 
 Run the `vllm-backend-matrix` skill when any of these change:
-- **Pinned package version** moves (each GPU section lists `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`). The skill auto-checks current versus pinned and flags drift. Even patch releases of flashinfer / triton routinely change autotune defaults.
+- **Pinned package version** moves (each GPU section lists `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`, `cuda-driver`, `cuda-toolkit`). The skill auto-checks current versus pinned and flags drift. Even patch releases of flashinfer / triton routinely change attention autotune defaults; CUDA driver/toolkit bumps can change JIT-compiled kernel codegen and trigger FlashInfer cubin redownloads.
 - New model architecture added to comparison set
 - New GPU added (any compute capability not yet in the file)
 - A model's quantization checkpoint is updated
+- A LoRA adapter for one of the test models is updated (the matrix is benchmarked with LoRA loaded — see table below)
 - A vLLM PR lands that touches the backend you care about (e.g. attention kernel tuning, new backend, dtype gate change)
+
+## LoRA adapters used for every benchmark
+
+Each model in the matrix is benchmarked with a representative LoRA adapter loaded, so the cells exercise the backend's LoRA dispatch path (closer to production deployment than a no-LoRA baseline). The same LoRA per model is used across every GPU table for consistency. Pick replacements that target the same module set (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `up_proj`, `gate_proj`, `down_proj`) so rank/alpha is the only variable that changes.
+
+| Base model | LoRA adapter | r / α | Notes |
+|---|---|---|---|
+| `prithivMLmods/gemma-4-E4B-it-FP8` (Gemma 4 E4B) | `Semaj90/gemma4-e4b-legal-grpo` | 16 / 16 | Excludes `vision_tower.*`, `audio_tower.*`, `multi_modal_projector.*` — required for Gemma 4's multimodal towers which vLLM doesn't expose for LoRA. |
+| `RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic` (Llama 3.2 3B) | `SidhaarthMurali/llama3.2-3b-math-ig` | 8 / 16 | Trained on `meta-llama/Llama-3.2-3B-Instruct`. Standard 7-module targets. |
+| `unsloth/Ministral-3-3B-Instruct-2512-FP8` (Ministral 3-3B) | `aswin00000/construction-safety-ministral3b-lora` | 32 / 64 | Trained on `mistralai/Ministral-3-3B-Instruct-2512`. Standard 7-module targets. |
 
 ---
 
@@ -32,6 +43,8 @@ Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-05-
 | `flashinfer-cubin` | 0.6.8.post1 |
 | `triton` | 3.6.0 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
+| `cuda-driver` | _(not recorded — rerun matrix on this GPU to capture)_ |
+| `cuda-toolkit` | _(not recorded — rerun matrix on this GPU to capture)_ |
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
@@ -65,6 +78,8 @@ Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-05-
 | `flashinfer-cubin` | 0.6.8.post1 |
 | `triton` | 3.6.0 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
+| `cuda-driver` | _(not recorded — rerun matrix on this GPU to capture)_ |
+| `cuda-toolkit` | _(not recorded — rerun matrix on this GPU to capture)_ |
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
@@ -98,6 +113,8 @@ Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-05-
 | `flashinfer-cubin` | 0.6.8.post1 |
 | `triton` | 3.6.0 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
+| `cuda-driver` | _(not recorded — rerun matrix on this GPU to capture)_ |
+| `cuda-toolkit` | _(not recorded — rerun matrix on this GPU to capture)_ |
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
@@ -132,6 +149,8 @@ Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-05-
 | `flashinfer-cubin` | 0.6.11.post3 |
 | `triton` | 3.6.0 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
+| `cuda-driver` | _(not recorded — rerun matrix on this GPU to capture)_ |
+| `cuda-toolkit` | _(not recorded — rerun matrix on this GPU to capture)_ |
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
@@ -173,6 +192,8 @@ Default precision: **INT8 W8A8 weights + BF16 KV cache**. Last measured **2026-0
 | `flashinfer-cubin` | 0.6.11.post3 |
 | `triton` | 3.6.0 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
+| `cuda-driver` | _(not recorded — rerun matrix on this GPU to capture)_ |
+| `cuda-toolkit` | _(not recorded — rerun matrix on this GPU to capture)_ |
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 

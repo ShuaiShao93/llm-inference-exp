@@ -64,6 +64,19 @@ def parse_args():
         help="If set, collect a torch profiler trace of the first post-warmup run "
              "and save it to this directory. Open with Perfetto UI or TensorBoard.",
     )
+    parser.add_argument(
+        "--lora",
+        default=None,
+        help="Optional LoRA adapter. HuggingFace ID or local path. "
+             "When set, vLLM is launched with enable_lora=True and the adapter "
+             "is applied to every generate() call (warmup and timed runs).",
+    )
+    parser.add_argument(
+        "--max_lora_rank",
+        type=int,
+        default=64,
+        help="Max LoRA rank to budget for in vLLM. Must be >= the adapter's actual rank.",
+    )
     return parser.parse_args()
 
 
@@ -159,6 +172,20 @@ def main():
         "max_model_len": args.input_tokens + args.max_output_tokens,
     }
 
+    lora_request = None
+    if args.lora is not None:
+        from vllm.lora.request import LoRARequest
+        from huggingface_hub import snapshot_download
+        # Resolve HF id -> local path (LoRARequest needs a local path).
+        if not os.path.isdir(args.lora):
+            local = snapshot_download(repo_id=args.lora, allow_patterns=["adapter_*", "*.json"])
+        else:
+            local = args.lora
+        llm_kwargs["enable_lora"] = True
+        llm_kwargs["max_lora_rank"] = args.max_lora_rank
+        llm_kwargs["max_loras"] = 1
+        lora_request = LoRARequest("bench-lora", 1, lora_path=local)
+
     if args.sliding_window is not None:
         llm_kwargs["hf_overrides"] = {"sliding_window": args.sliding_window}
 
@@ -188,6 +215,7 @@ def main():
     print(f"Chunked prefill:  {'disabled' if args.disable_chunked_prefill else 'enabled'}")
     print(f"FlashInfer autotune:{args.flashinfer_autotune}")
     print(f"Prefix caching:   disabled")
+    print(f"LoRA adapter:     {args.lora if args.lora else 'none'}")
     if args.profile_dir is not None:
         print(f"Profile dir:      {os.path.abspath(args.profile_dir)}")
     print()
@@ -223,8 +251,12 @@ def main():
         ignore_eos=True,
     )
 
+    gen_kwargs = {"sampling_params": sampling_params, "use_tqdm": False}
+    if lora_request is not None:
+        gen_kwargs["lora_request"] = lora_request
+
     print("Warming up...")
-    llm.generate(prompt, sampling_params, use_tqdm=False)
+    llm.generate(prompt, **gen_kwargs)
 
     import ctypes
     cudart = ctypes.CDLL("libcudart.so")
@@ -236,7 +268,7 @@ def main():
         if i == 0 and args.profile_dir is not None:
             llm.start_profile()
         start = time.perf_counter()
-        llm.generate(prompt, sampling_params, use_tqdm=False)
+        llm.generate(prompt, **gen_kwargs)
         elapsed_ms = (time.perf_counter() - start) * 1000
         if i == 0 and args.profile_dir is not None:
             llm.stop_profile()

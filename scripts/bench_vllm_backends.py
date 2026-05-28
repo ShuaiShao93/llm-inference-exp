@@ -84,13 +84,15 @@ def run_one(
     timeout_s: int,
     log_dir: Path,
     tokenizer_mode: str = "auto",
+    lora: str | None = None,
 ) -> dict:
     """Run a single (model, backend, precision, kv) cell. Return result dict.
 
     Always writes a per-cell log under ``log_dir`` so the agent can diagnose
     failures without re-running.
     """
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{model}__{backend}__{precision}__{kv}")
+    safe_lora = re.sub(r"[^A-Za-z0-9._-]", "_", lora) if lora else "nolora"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{model}__{backend}__{precision}__{kv}__{safe_lora}")
     logfile = log_dir / f"{safe}.log"
     cmd = [
         sys.executable,
@@ -104,6 +106,8 @@ def run_one(
         "--num_runs", str(num_runs),
         "--tokenizer_mode", tokenizer_mode,
     ]
+    if lora:
+        cmd += ["--lora", lora]
     env = {**os.environ, "CUDA_HOME": os.environ.get("CUDA_HOME", "/usr/local/cuda")}
     start = time.time()
     try:
@@ -170,12 +174,13 @@ def run_cell(
     timeout_s: int,
     log_dir: Path,
     tokenizer_mode: str = "auto",
+    lora: str | None = None,
 ) -> dict:
     """Try each precision tier in order until one succeeds. Return the result
     plus the (precision, kv) tuple that worked (or None if all failed)."""
     attempts = []
     for precision, kv in tiers:
-        r = run_one(model, backend, precision, kv, input_tokens, num_runs, timeout_s, log_dir, tokenizer_mode)
+        r = run_one(model, backend, precision, kv, input_tokens, num_runs, timeout_s, log_dir, tokenizer_mode, lora=lora)
         attempts.append({"precision": precision, "kv": kv, **r})
         if r["status"] == "ok":
             return {"chosen": {"precision": precision, "kv": kv}, "attempts": attempts}
@@ -197,7 +202,20 @@ def main() -> int:
     ap.add_argument("--log_dir", default="/tmp/vllm_backend_matrix_logs")
     ap.add_argument("--tokenizer_mode", default="auto",
                     help="Pass-through to vllm_local.py (auto/mistral/slow). Set 'mistral' for Mistral/Ministral checkpoints with only tekken.json.")
+    ap.add_argument("--lora", action="append", default=[],
+                    metavar="MODEL=LORA_HF_ID",
+                    help="Repeatable mapping of model HF id to LoRA adapter HF id (or local path). "
+                         "Adapter is loaded for every backend cell of MODEL. Models without a mapping "
+                         "are benchmarked without LoRA — the JSON records `lora` per cell so the agent "
+                         "can footnote no-LoRA rows in the markdown.")
     args = ap.parse_args()
+    # Parse --lora into a dict
+    lora_map: dict[str, str] = {}
+    for kv in args.lora:
+        if "=" not in kv:
+            ap.error(f"--lora expects MODEL=LORA_HF_ID, got: {kv}")
+        m, l = kv.split("=", 1)
+        lora_map[m] = l
 
     # GPU info
     gpu = subprocess.check_output(
@@ -226,6 +244,28 @@ def main() -> int:
         except md.PackageNotFoundError:
             versions[pkg] = None
 
+    # CUDA driver version from nvidia-smi (e.g. "595.71.05") and CUDA toolkit
+    # version from nvcc (e.g. "13.2"). The toolkit version is what nvcc compiles
+    # against; the driver is what runs on the device. Differences here also
+    # affect kernel codegen and JIT compilation paths.
+    try:
+        driver = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            text=True,
+        ).strip().splitlines()[0].strip()
+    except Exception:
+        driver = None
+    try:
+        nvcc_out = subprocess.check_output(
+            ["/usr/local/cuda/bin/nvcc", "--version"], text=True,
+        )
+        m = re.search(r"release\s+([\d.]+)", nvcc_out)
+        toolkit = m.group(1) if m else None
+    except Exception:
+        toolkit = None
+    versions["cuda-driver"] = driver
+    versions["cuda-toolkit"] = toolkit
+
     results = {
         "gpu_name": gpu_name,
         "compute_cap": compute_cap,
@@ -233,6 +273,7 @@ def main() -> int:
         "versions": versions,
         # Kept for backwards compatibility with prior consumers; same as versions["vllm"].
         "vllm_version": versions.get("vllm"),
+        "lora_map": lora_map,
         "input_tokens": args.input_tokens,
         "num_runs": args.num_runs,
         "default_tier": default_tier,
@@ -244,10 +285,14 @@ def main() -> int:
 
     for model in args.model:
         results["cells"][model] = {}
+        model_lora = lora_map.get(model)
         for backend in args.backends:
-            print(f"\n=== {model} × {backend} ===", file=sys.stderr)
+            tag = f" [lora={model_lora}]" if model_lora else ""
+            print(f"\n=== {model} × {backend}{tag} ===", file=sys.stderr)
             cell = run_cell(model, backend, tiers, args.input_tokens,
-                            args.num_runs, args.per_cell_timeout_s, log_dir, args.tokenizer_mode)
+                            args.num_runs, args.per_cell_timeout_s, log_dir, args.tokenizer_mode,
+                            lora=model_lora)
+            cell["lora"] = model_lora
             results["cells"][model][backend] = cell
             # Persist incrementally so a long run is recoverable
             Path(args.output).write_text(json.dumps(results, indent=2))
