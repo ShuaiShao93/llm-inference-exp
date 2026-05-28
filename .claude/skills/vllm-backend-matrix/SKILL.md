@@ -76,7 +76,7 @@ Then diff the live versions against the version block in the matching GPU sectio
 By default, refresh with the same models already in the file (so cell numbers update with new vLLM / kernel versions). If the user asks to add a model, append it to the args.
 
 Reasonable default set for a "what is the state of vLLM long-context attention" sweep:
-- A model with **exotic head_dim** (Gemma 4 E4B — `head_dim=512` globals)
+- Two **exotic-head_dim** sizes from the same family to expose hidden_size scaling at fixed `global_head_dim=512` (Gemma 4 E2B and E4B)
 - A canonical **dense GQA** model (Llama 3.2 3B)
 - A **different architecture** for variety (Ministral 3-3B)
 
@@ -98,7 +98,12 @@ CUDA_HOME=/usr/local/cuda /usr/bin/python3.12 scripts/bench_vllm_backends.py \
   --output /tmp/vllm_backend_matrix.json
 ```
 
-If you're adding a new model, first try HF search for an existing adapter at r=16/α=16 (filter: `lora` tag + base model name; check `adapter_config.json` for `target_modules ⊇ {q,k,v,o,up,gate,down}_proj`, no `modules_to_save`, no `use_dora`, no `use_rslora`, no multimodal tower targets). If nothing on HF matches, **generate a synthetic one** via `scripts/build_synthetic_lora.py` (random weights, but identical compute shape). Smoke-test once, then add the mapping to both the matrix's LoRA table and the sweep invocation.
+If you're adding a new model, first try HF search for an existing adapter at r=16/α=16 (filter: `lora` tag + base model name; check `adapter_config.json` for `target_modules ⊇ {q,k,v,o,up,gate,down}_proj`, no `modules_to_save`, no `use_dora`, no `use_rslora`, no multimodal tower targets). If nothing on HF matches:
+
+- **Generate a synthetic adapter** via `scripts/build_synthetic_lora.py` (random weights, identical compute shape). Works for any model PEFT can wrap.
+- For Gemma 4 family (`Gemma4ClippableLinear` blocks PEFT from generating one), pick the cleanest real HF adapter at r=16/α=16. If it was trained on the full multimodal model (`unsloth_fixed=true` / safetensors contains `audio_tower.*` / `vision_tower.*` keys), run it through **`scripts/strip_tower_lora.py`** to drop the tower entries before vLLM will accept it.
+
+Smoke-test the resulting adapter with the FP8 base model once, then add the mapping to both the matrix's LoRA table and the sweep invocation.
 
 This runs `N_models × N_backends × tiers-until-one-works` cells. With 4 backends and tiers averaging ~1.5 attempts per cell, expect roughly `4 × 1.5 = 6` runs per model. Each run is one full vLLM engine init + 5 timed iterations at 100k context — usually 2-5 minutes per cell, longer for larger models. A 3-model × 4-backend sweep on H100 is roughly 1-2 hours wall clock.
 

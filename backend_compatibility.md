@@ -26,11 +26,12 @@ Each model in the matrix is benchmarked with a LoRA adapter loaded, so the cells
 
 | Base model | LoRA adapter | r / α | Source |
 |---|---|---|---|
-| `prithivMLmods/gemma-4-E4B-it-FP8` (Gemma 4 E4B) | `Semaj90/gemma4-e4b-legal-grpo` | 16 / 16 | HF (real). Excludes `vision_tower.*`, `audio_tower.*`, `multi_modal_projector.*`. |
+| `prithivMLmods/gemma-4-E4B-it-FP8` (Gemma 4 E4B) | `Semaj90/gemma4-e4b-legal-grpo` | 16 / 16 | HF (real). Already excludes `vision_tower.*`, `audio_tower.*`, `multi_modal_projector.*`. |
+| `prithivMLmods/gemma-4-E2B-it-FP8` (Gemma 4 E2B) | `~/model_ckpt/synthetic-loras/gemma-4-e2b-r16-stripped` | 16 / 16 | HF `imranulhaquenoor/gemma4-e2b-urdu-tutor-lora` (r=16/α=16) post-processed by `scripts/strip_tower_lora.py` to drop `vision_tower.*` / `audio_tower.*` / `multi_modal_projector.*` weights (the source LoRA was trained on the full multimodal model). |
 | `RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic` (Llama 3.2 3B) | `~/model_ckpt/synthetic-loras/llama-3.2-3b-r16` | 16 / 16 | Synthetic (built by `scripts/build_synthetic_lora.py`; random weights). |
 | `unsloth/Ministral-3-3B-Instruct-2512-FP8` (Ministral 3-3B) | `~/model_ckpt/synthetic-loras/ministral-3-3b-r16` | 16 / 16 | Synthetic (built by `scripts/build_synthetic_lora.py`; random weights, towers excluded). |
 
-The Gemma 4 row uses a real HF adapter because PEFT can't currently wrap Gemma 4's `Gemma4ClippableLinear` (raises *"Target module ... is not supported"*); the existing `Semaj90` adapter happens to be at r=16/α=16 with the right module set already, so we keep it.
+The Gemma 4 rows use real HF adapters because PEFT can't currently wrap Gemma 4's `Gemma4ClippableLinear` (raises *"Target module ... is not supported"*) — we can't generate one synthetically. The E4B row's adapter happens to be tower-clean already; the E2B row's adapter needed a post-process pass (`scripts/strip_tower_lora.py`) to drop multimodal-tower weights that vLLM rejects.
 
 To regenerate the synthetic adapters (e.g. when a base model is replaced), run:
 
@@ -65,6 +66,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
+| Gemma 4 E2B (`prithivMLmods/gemma-4-E2B-it-FP8`) | ❌ CUBLAS / illegal-memory crash³ | ❌ head_size=512 unsupported | ❌ CUBLAS / illegal-memory crash³ | ❌ FP8 KV cache unsupported |
 | Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | **3719¹** | ❌ head_size=512 unsupported | 9003² | ❌ FP8 KV cache unsupported |
 | Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | **3994** | 10168 | 26078 | ❌ FP8 KV cache unsupported |
 | Ministral 3-3B Instruct (`unsloth/Ministral-3-3B-Instruct-2512-FP8`) | **4463** | 12223 | 28873 | ❌ FP8 KV cache unsupported |
@@ -72,6 +74,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 **Footnotes**:
 - ¹ FA's cute (FA4) path on Gemma 4 (`head_dim=512`) asserts `q.dtype in [fp16, bf16]` when KV cache is FP8 → falls back to **BF16 KV cache** for this cell. All other cells use FP8 KV.
 - ² TRITON_ATTN result reflects the tuning from [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) (`num_warps=8, num_stages=2, TILE_SIZE=64` gated on `head_dim≥512`).
+- ³ E2B + LoRA at 100k crashes inside `gpu_model_runner.execute_model` with `cublasGemmEx → CUBLAS_STATUS_EXECUTION_FAILED → cudaErrorIllegalAddress`. Reproduces on **both** FA and TRITON_ATTN, so the bug is upstream of the attention backend. Isolation:  E2B no-LoRA at 100k works ✓ ;  E2B + LoRA at 1k works ✓ ;  E2B + LoRA at 100k fails ✗. The shape is unusual — `num_kv_heads=1` with `head_dim=256` plus r=16 LoRA on k_proj/v_proj produces a (16 × 256) GEMM that probably hits a CUBLAS edge case at the 100k-token activation size. Not seen on E4B (`num_kv_heads=2`). Worth filing upstream against vLLM/CUBLAS once we have a minimal repro.
 
 **Notes**:
 - All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard projection modules). See the "LoRA adapters used for every benchmark" table near the top of this file. Comparable no-LoRA numbers from the previous matrix run (vllm 0.21.0 + flashinfer 0.6.8 + triton 3.6 + driver 595 + toolkit 13.2) were E4B-FA 2973 ms / E4B-TRITON 8212 ms; Llama-FA 3506 / Llama-FLASHINFER 9744 / Llama-TRITON 27298; Ministral-FA 3997 / Ministral-FLASHINFER 11840 / Ministral-TRITON 31443. LoRA dispatch adds ~5-25% on FA-class backends and is roughly flat on the slower backends.

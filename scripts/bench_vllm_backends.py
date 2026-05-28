@@ -153,9 +153,13 @@ def run_one(
         (r"torch\.OutOfMemoryError: CUDA out of memory", "OOM"),
         (r"FlexAttention does not support kv sharing", "FlexAttention: KV sharing not supported"),
         (r"NotImplementedError", "not implemented"),
-        (r"head_size=\d+ on SM\d+: upgrading FlashAttention", "FA3 head_size unsupported on this SM; FA4 fallback may have its own issues"),
+        # Don't match the "FA3 does not support head_size=...: upgrading FlashAttention 3 -> 4"
+        # message — that's the INFO log line right before FA4 takes over. It's not the failure.
         (r"is not valid for this configuration\. Reason: \['([^']+)'", lambda m: m.group(1)),
         (r"RuntimeError: shape '\[[^\]]+\]' is invalid", "shape mismatch"),
+        (r"CUBLAS_STATUS_EXECUTION_FAILED", "CUBLAS execution failed (likely a kernel bug for this shape)"),
+        (r"cudaErrorIllegalAddress|an illegal memory access was encountered",
+            "CUDA illegal memory access (kernel crash for this shape)"),
     ]
     for pat, label in patterns:
         m = re.search(pat, text)
