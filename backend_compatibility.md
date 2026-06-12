@@ -50,13 +50,13 @@ Synthetic-weight performance is identical to real-weight performance (LoRA dispa
 
 ## NVIDIA H100 80GB HBM3 (SM90, Hopper)
 
-Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-05-28**.
+Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-06-12**.
 
 | Package | Version |
 |---|---|
-| `vllm` | 0.21.0 |
-| `flashinfer-python` | 0.6.11.post3 |
-| `flashinfer-cubin` | 0.6.11.post3 |
+| `vllm` | 0.22.1 |
+| `flashinfer-python` | 0.6.12 |
+| `flashinfer-cubin` | 0.6.12 |
 | `triton` | 3.7.0 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
 | `cuda-driver` | 610.43.02 |
@@ -66,22 +66,23 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E2B (`prithivMLmods/gemma-4-E2B-it-FP8`) | ❌ CUBLAS / illegal-memory crash³ | ❌ head_size=512 unsupported | ❌ CUBLAS / illegal-memory crash³ | ❌ FP8 KV cache unsupported |
-| Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | **3719¹** | ❌ head_size=512 unsupported | 9003² | ❌ FP8 KV cache unsupported |
-| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | **3994** | 10168 | 26078 | ❌ FP8 KV cache unsupported |
-| Ministral 3-3B Instruct (`unsloth/Ministral-3-3B-Instruct-2512-FP8`) | **4463** | 12223 | 28873 | ❌ FP8 KV cache unsupported |
+| Gemma 4 E2B (`prithivMLmods/gemma-4-E2B-it-FP8`) | ❌ CUBLAS crash on BF16-KV fallback³ | ❌ FlashInfer kernel template missing on SM90⁴ | **12388**² | ❌ FP8 KV cache unsupported |
+| Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | **3814¹** | ❌ FlashInfer kernel template missing on SM90⁴ | 13540² | ❌ FP8 KV cache unsupported |
+| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | **3964** | 10166 | 26656 | ❌ FP8 KV cache unsupported |
+| Ministral 3-3B Instruct (`unsloth/Ministral-3-3B-Instruct-2512-FP8`) | **4443** | 12194 | 29958 | ❌ FP8 KV cache unsupported |
 
 **Footnotes**:
-- ¹ FA's cute (FA4) path on Gemma 4 (`head_dim=512`) asserts `q.dtype in [fp16, bf16]` when KV cache is FP8 → falls back to **BF16 KV cache** for this cell. All other cells use FP8 KV.
-- ² TRITON_ATTN result reflects the tuning from [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) (`num_warps=8, num_stages=2, TILE_SIZE=64` gated on `head_dim≥512`).
-- ³ E2B + LoRA at 100k crashes inside `gpu_model_runner.execute_model` with `cublasGemmEx → CUBLAS_STATUS_EXECUTION_FAILED → cudaErrorIllegalAddress`. Reproduces on **both** FA and TRITON_ATTN, so the bug is upstream of the attention backend. Isolation:  E2B no-LoRA at 100k works ✓ ;  E2B + LoRA at 1k works ✓ ;  E2B + LoRA at 100k fails ✗. The shape is unusual — `num_kv_heads=1` with `head_dim=256` plus r=16 LoRA on k_proj/v_proj produces a (16 × 256) GEMM that probably hits a CUBLAS edge case at the 100k-token activation size. Not seen on E4B (`num_kv_heads=2`). Worth filing upstream against vLLM/CUBLAS once we have a minimal repro.
+- ¹ FA on Gemma 4 (`head_dim=512`) with FP8 KV now hits `AssertionError: FP8 is only supported on SM100 (compute capability 10.x) for FA4 CuTe` (vllm 0.22.1 made this gate explicit, was a q.dtype assert before). Falls back to **BF16 KV cache**. All other cells use FP8 KV.
+- ² TRITON_ATTN on Gemma 4 head_dim=512: the [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) tuning (`num_warps=8, num_stages=2, TILE_SIZE=64` gated on `head_dim≥512`) **is not present in vLLM 0.22.1's bundled `triton_unified_attention.py`** — the file was significantly rewritten between releases and the tune did not survive. E4B TRITON_ATTN regressed from 9003 ms (0.21.0 + PR patch) to 13540 ms (0.22.1 stock). Re-upstreaming the tune onto the 0.22.x file is a TODO.
+- ³ E2B + LoRA + FA at 100k still crashes on the BF16-KV fallback path: `cublasGemmEx → CUBLAS_STATUS_EXECUTION_FAILED → cudaErrorIllegalAddress`. The bug fix in 0.22.1 only repaired the TRITON_ATTN path (E2B × TRITON_ATTN now succeeds at 12388 ms vs CUBLAS crash on 0.21.0). FA path remains broken — likely the same narrow-KV (num_kv_heads=1) + LoRA edge case but in a different GEMM call. Isolation:  E2B no-LoRA at 100k works ✓ ;  E2B + LoRA at 1k works ✓ ;  E2B + LoRA + FA at 100k fails ✗.
+- ⁴ vllm 0.22.1 picked up [vllm#38822](https://github.com/vllm-project/vllm/pull/38822) (FlashInfer head_dim=512 whitelist) so FLASHINFER no longer rejects Gemma 4 at backend selection. Dispatch now reaches the FlashInfer kernel, which then fails with *"Invalid configuration"* because no SM90 cubin exists for head_dim=512 (the prebuilt cubins target Blackwell SM100+ only). End result is the same — FLASHINFER unusable for Gemma 4 on Hopper — but the failure mode moved one layer deeper.
 
 **Notes**:
-- All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard projection modules). See the "LoRA adapters used for every benchmark" table near the top of this file. Comparable no-LoRA numbers from the previous matrix run (vllm 0.21.0 + flashinfer 0.6.8 + triton 3.6 + driver 595 + toolkit 13.2) were E4B-FA 2973 ms / E4B-TRITON 8212 ms; Llama-FA 3506 / Llama-FLASHINFER 9744 / Llama-TRITON 27298; Ministral-FA 3997 / Ministral-FLASHINFER 11840 / Ministral-TRITON 31443. LoRA dispatch adds ~5-25% on FA-class backends and is roughly flat on the slower backends.
-- FLASH_ATTN is the default to reach for on Hopper FP8 workloads — 2.3-6.5× faster than the alternatives across every working configuration here.
+- All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard projection modules). See the "LoRA adapters used for every benchmark" table near the top of this file.
+- FLASH_ATTN is the default to reach for on Hopper FP8 workloads — 2.5-6.7× faster than the alternatives across every working configuration here.
 - FLASHINFER is the fallback when FA rejects the shape (head_dim, mask combos, …). On Hopper today it underperforms FA significantly at long context.
 - TRITON_ATTN is the last-resort fallback. Useful when both FA and FlashInfer reject the model (Gemma 4 + FP8 KV is the canonical case — FA falls back to BF16 KV there, TRITON_ATTN is needed if you must keep FP8 KV).
-- FLEX_ATTENTION uniformly rejects FP8 KV cache on this stack (it doesn't enter the backend, so the previously-seen "OOM at 100k" failure mode never materializes here). Not viable for FP8-KV deployments on H100.
+- FLEX_ATTENTION uniformly rejects FP8 KV cache on this stack — not viable for FP8-KV deployments on H100.
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM (`SHORT_CONV`, `LINEAR`, `GDN_ATTN`) backends are not applicable to standard dense LLMs on NVIDIA datacenter GPUs.
 
 ---

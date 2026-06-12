@@ -150,6 +150,8 @@ def run_one(
         (r"FlashInfer Internal Error: Invalid configuration", "FlashInfer kernel template missing for this shape"),
         (r"AssertionError: inputs must be float16 or bfloat16",
             "FA cute kernel asserts on Q dtype (FP8 KV triggers FP8-Q quant)"),
+        (r"AssertionError: FP8 is only supported on SM\d+",
+            "FA4 CuTe FP8 KV requires SM100+ (Blackwell)"),
         (r"torch\.OutOfMemoryError: CUDA out of memory", "OOM"),
         (r"FlexAttention does not support kv sharing", "FlexAttention: KV sharing not supported"),
         (r"NotImplementedError", "not implemented"),
