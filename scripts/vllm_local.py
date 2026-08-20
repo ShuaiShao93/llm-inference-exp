@@ -77,6 +77,14 @@ def parse_args():
         default=64,
         help="Max LoRA rank to budget for in vLLM. Must be >= the adapter's actual rank.",
     )
+    parser.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        default=None,
+        help="Override vLLM's gpu_memory_utilization. Lower it when a backend OOMs "
+             "allocating its own workspace: vLLM sizes the KV cache to fill this "
+             "budget, leaving nothing for workspaces allocated after engine init.",
+    )
     return parser.parse_args()
 
 
@@ -171,6 +179,9 @@ def main():
         "enable_chunked_prefill": not args.disable_chunked_prefill,
         "max_model_len": args.input_tokens + args.max_output_tokens,
     }
+
+    if args.gpu_memory_utilization is not None:
+        llm_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
 
     lora_request = None
     if args.lora is not None:

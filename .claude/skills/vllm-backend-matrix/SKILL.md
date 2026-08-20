@@ -1,27 +1,47 @@
 ---
 name: vllm-backend-matrix
-description: Build (or refresh) the vLLM attention backend × model latency matrix for the current GPU at 100k input / 1 output. Use when the user wants to know which backend / precision is best for a model on a given GPU, or when `backend_compatibility.md` is missing data for the current hardware. Updates `backend_compatibility.md` in place.
-argument-hint: [--model <hf_id>]... [--backends <NAME>...]
+description: Build (or refresh) the vLLM attention backend × model latency matrix for the current GPU at 10k and 100k input / 1 output. Use when the user wants to know which backend / precision is best for a model on a given GPU, or when `backend_compatibility.md` is missing data for the current hardware. Updates `backend_compatibility.md` in place.
+argument-hint: [--model <hf_id>]... [--backends <NAME>...] [--input_tokens <N>...]
 allowed-tools: [Bash, Read, Write, Edit]
 ---
 
 # vLLM Backend × Precision Matrix Builder
 
-Empirically determine which (backend, precision, KV-cache dtype) combinations work for a given set of models on the current GPU at long-context prefill (100k input, 1 output), then write the result to `backend_compatibility.md` at the repo root.
+Empirically determine which (backend, precision, KV-cache dtype) combinations work for a given set of models on the current GPU, then write the result to `backend_compatibility.md` at the repo root.
+
+Each cell is measured at **two input lengths — 10k and 100k — with 1 output token**. Both are prefill-dominated, but they stress different things: at 100k attention dominates and kernel quality decides the winner, while at 10k the fixed overheads (engine dispatch, LoRA shrink/expand, GEMM launch tails) are a much larger share of wall clock. **The best backend is not always the same at both lengths**, which is exactly why both are recorded — a backend chosen only from 100k numbers can be the wrong default for short-prompt production traffic.
 
 ## Arguments
 
 $ARGUMENTS
 
-Parse optional repeatable `--model <hf_id>` and `--backends <NAME ...>`. Defaults are read from `backend_compatibility.md`'s current model set (so re-running the skill regenerates the existing tables). If the file has no entry for the current GPU, prompt the user for the model set if they didn't pass `--model`.
+Parse optional repeatable `--model <hf_id>`, `--backends <NAME ...>`, and `--input_tokens <N ...>`. Defaults are read from `backend_compatibility.md`'s current model set and input lengths (so re-running the skill regenerates the existing tables). If the file has no entry for the current GPU, prompt the user for the model set if they didn't pass `--model`.
 
 ## Key Caveats (Read First)
 
-- **Never run two benchmark processes at the same time** (CLAUDE.md rule). The helper script `scripts/bench_vllm_backends.py` enforces this — don't bypass it.
+- **Never run two benchmark processes at the same time** (CLAUDE.md rule). `scripts/bench_vllm_backends.py` runs its *own* cells strictly one at a time, but it does **not** detect a benchmark someone else already started. Before launching, confirm the GPU is idle yourself:
+
+  ```bash
+  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader
+  ```
+
+  Empty output means clear to go. If anything is resident, stop and ask — don't kill it.
 - **First check `backend_compatibility.md`** before running anything. If the current GPU already has a table and the user didn't ask to refresh, point them at it.
 - **Run on a quiet GPU** — vllm grabs ~90% of memory by default; warmup compares badly if another process is contending.
 - **Tier ordering matters**: the script picks the most aggressive precision first (FP4 on Blackwell, FP8 on Hopper/Ada) and falls back. Don't override the order unless you have a hardware reason — the matrix records non-default cells in footnotes.
-- **The script's `--per_cell_timeout_s` default is 30 minutes** (1800s). Long enough for engine init + 5 runs of a 26B MoE at 100k. If you cut it shorter and a real run gets killed, the cell is reported as a false negative.
+- **The script's `--per_cell_timeout_s` default is 30 minutes** (1800s). Long enough for engine init + several runs of a 26B MoE at 100k. If you cut it shorter and a real run gets killed, the cell is reported as a false negative.
+- **A long sweep must survive a dropped connection.** These runs take hours; launch with `nohup ... &` (or tmux) and redirect output to a file rather than holding the foreground. The script persists its JSON incrementally after every cell, so an interrupted sweep can be read for partial results and resumed by re-running with only the missing models/backends.
+- **Track and stop the sweep by PID, and get the PID right.** If you launch under `setsid`/`nohup`, a transient parent shell can appear in `pgrep` output ahead of the real Python process — match on the interpreter (`pgrep -f 'python3.12 scripts/bench_vllm_backends'`) and confirm the PID's command line before waiting on it, or you'll "wait" on a process that already exited and conclude the sweep finished instantly. To stop a sweep, kill that PID; **never `pkill -f bench_vllm_backends`** — on a remote host the pattern also matches your own shell command containing that string, so you kill your session instead of (or as well as) the job.
+- **An OOM is never a backend verdict — always retest it at a lower memory budget.** vLLM sizes the KV cache to fill `gpu_memory_utilization`, and a backend that allocates its workspace *after* engine init then finds nothing left. FlashInfer is the usual victim: at the default budget it can OOM on a small model on a huge card (the KV cache having eaten ~64 of 96 GiB), which looks identical to a genuine incompatibility. Re-run the cell with `--gpu_memory_utilization 0.75` before recording `❌ OOM`:
+
+  ```bash
+  ... --backends FLASHINFER --gpu_memory_utilization 0.75 --output /tmp/retest.json
+  ```
+
+  Latency is largely insensitive to the budget once the model fits (a control cell moved <0.2% between 0.92 and 0.75), so a retest number is comparable to the rest of the table — record it with a footnote naming the budget it needed. Getting this wrong is expensive in the other direction too: it can bury the *fastest* backend for a model behind a fake incompatibility. Retest crashes the same way: if an illegal-memory-access or CUBLAS failure survives a lower budget, you've earned the right to record it as a real kernel bug instead of hedging.
+- **A failure reproduced on two independent backends is a property of the model, not the backends.** When the same signature (illegal memory access, CUBLAS crash) appears at the same input length under, say, both FLASHINFER and TRITON_ATTN, stop looking for a backend explanation — it's the model's shape at that context length. Say so in the footnote; a reader deciding "which backend do I pick" needs to know that switching backends won't help.
+- **`kill -0 <pid>` fails with EPERM across users**, so a watcher loop like `while kill -0 $PID; do sleep 60; done` exits instantly — and looks exactly like "the sweep finished" — if you're logged in as a different user than the one that launched it. Confirm ownership (`ps -o user= -p $PID`) before trusting a wait loop.
+- **Failures short-circuit across input lengths.** Lengths are swept ascending; a cell that fails at 10k for a length-invariant reason (dtype gate, head_size, backend-selection rejection) is not re-run at 100k — it inherits the reason and is marked `"skipped": true` in the JSON. Length-*sensitive* failures (OOM, CUBLAS / illegal-address crashes, missing FlashInfer cubins, timeouts) always re-run, because they legitimately differ between 10k and 100k. Pass `--no_short_circuit` to force every length.
 
 ## Precision tiers
 
@@ -33,6 +53,8 @@ The script chooses tiers from `nvidia-smi --query-gpu=compute_cap`:
 | SM 10.0/10.3 (Blackwell datacenter), SM 12.x (Blackwell consumer) | `(fp4, fp8)` → `(fp4, auto)` → `(fp8, fp8)` → `(fp8, auto)` |
 
 First success wins. Any cell that uses a non-default tier is annotated in the matrix footnote.
+
+A **pre-quantized checkpoint only supports the precision it was built at** — an NVFP4 checkpoint rejects the `fp8` tiers with *"requested precision 'fp8' does not match model's built-in precision 'fp4'"*. The script learns this from the first such rejection and skips the remaining mismatched tiers (recorded as `skipped — checkpoint is fp4-only`), so the effective tier count on Blackwell is 2 (KV-dtype fallbacks), not 4. This is why the checkpoint must match the GPU's tier (Step 2): a checkpoint at the wrong precision doesn't fall back gracefully, it fails the whole row.
 
 Override the tier list by editing `detect_precision_tiers()` in the helper script — for instance if a new Blackwell SKU adds FP4-KV FMHA kernels.
 
@@ -57,6 +79,21 @@ Then diff the live versions against the version block in the matching GPU sectio
 
 (`flash-attn` is vendored inside vllm and tracks the vllm version; no separate check.)
 
+### The flashinfer two-package trap
+
+`flashinfer-cubin` is **optional and not a vLLM dependency** — vLLM only requires `flashinfer-python`. FlashInfer resolves its cubins in this order (`flashinfer/jit/env.py:_get_cubin_dir`):
+
+1. `$FLASHINFER_CUBIN_DIR` if set
+2. the `flashinfer-cubin` package **if installed** — this path enforces an **exact** version equality with `flashinfer-python` and raises `RuntimeError` on any mismatch
+3. otherwise `$FLASHINFER_CACHE_DIR/cubins`, **fetched on demand at runtime**
+
+Consequences worth internalising before touching these packages:
+
+- **The two packages are published on independent cadences**, and `flashinfer-cubin` lags. So installing it silently caps `flashinfer-python` at the newest cubin release — a ceiling that can sit *below* vLLM's declared pin.
+- **A mismatch breaks every backend, not just FLASHINFER.** vLLM imports `flashinfer.comm` while building its compilation passes, so engine init dies before attention backend selection. Symptom is a bare `RuntimeError: Engine core initialization failed` and the classifier reports `unknown — see log` for *every* cell. If a whole sweep fails that way, check these two versions before suspecting the GPU or the model.
+- **Prefer no `flashinfer-cubin`** unless you specifically need offline/pinned cubins: with it absent, flashinfer fetches cubins matching its own version, which cannot mismatch. Record it as `not installed (cubins fetched at runtime)` in the version block.
+- Don't "fix" a mismatch with `FLASHINFER_DISABLE_VERSION_CHECK=1` for a matrix run — it loads cubins built for a different version and can fabricate `kernel template missing` failures that look like genuine backend incompatibilities.
+
 - **No GPU section yet for this hardware** → also check the OTHER GPU sections in the file: if any of them was measured against a *newer* `vllm` / `flashinfer-python` / `flashinfer-cubin` / `triton` than what's currently installed, **stop and prompt the user to upgrade first**. A matrix row measured on an older vLLM is misleading next to peers measured on a newer one. Quote the gap:
 
   > "Existing rows in backend_compatibility.md (H100) were measured on `vllm==0.21.0`. Current env has `vllm==0.20.2`. Recommend upgrading vllm/flashinfer/triton via `pip install --upgrade vllm` (and `pip index versions vllm` to confirm latest) before populating the new GPU section. Otherwise the SM120 row will be on a different vLLM minor version than the H100 row and not comparable."
@@ -78,25 +115,59 @@ By default, refresh with the same models already in the file (so cell numbers up
 Reasonable default set for a "what is the state of vLLM long-context attention" sweep:
 - Two **exotic-head_dim** sizes from the same family to expose hidden_size scaling at fixed `global_head_dim=512` (Gemma 4 E2B and E4B)
 - A canonical **dense GQA** model (Llama 3.2 3B)
-- A **different architecture** for variety (Ministral 3-3B)
 
 Add an MoE if you have one cached (Gemma 4 A4B, DeepSeek-V2-Lite, etc.) to surface MoE-specific routing costs.
 
-## Step 3: Run the sweep
+Pick the checkpoint whose quantization matches the GPU's default precision tier, since the same model needs a different checkpoint per tier. For Gemma 4 E2B: `prithivMLmods/gemma-4-E2B-it-FP8` (FP8 tier — Hopper/Ada), `Neural-ICE/Gemma-4-E2B-it-NVFP4` (FP4 tier — Blackwell), `glenic/gemma-4-E2B-it-W8A8-INT8` (INT8 tier — Ampere). Prefer **modelopt-format** NVFP4 with 4-bit *activations*; many HF checkpoints tagged `NVFP4` are actually weight-only (`nvfp4-pack-quantized` with `input_activations: null`) or mixed-precision, which silently benchmarks a different precision than the tier claims. Verify `config.json` → `quantization_config.config_groups.*.input_activations` before trusting a checkpoint name.
 
-Every benchmark in this skill runs with a LoRA adapter loaded. All adapters are pinned at **r=16, alpha=16** targeting the 7 standard projection modules (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `up_proj`, `gate_proj`, `down_proj`) so LoRA compute shape is constant across models. The per-model adapter mapping is pinned in the "LoRA adapters used for every benchmark" table at the top of `backend_compatibility.md` — read it before invoking the script and pass each mapping via `--lora MODEL=LORA_HF_ID_OR_LOCAL_PATH`. Failing to load the LoRA is a benchmark failure (not silently skipped) so we catch it explicitly.
+## Step 3: Materialize the LoRA adapters (do this before the sweep)
+
+Every benchmark in this skill runs with a LoRA adapter loaded. All adapters are pinned at **r=16, alpha=16** targeting the 7 standard projection modules (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `up_proj`, `gate_proj`, `down_proj`) so LoRA compute shape is constant across models. The per-model adapter mapping is pinned in the "LoRA adapters used for every benchmark" table at the top of `backend_compatibility.md`. Failing to load the LoRA is a benchmark failure (not silently skipped) so we catch it explicitly.
+
+**The local adapter paths in that table are not guaranteed to exist on the machine you're on.** They live under `~/model_ckpt/synthetic-loras/` — machine-local, not in git, and not present on a freshly provisioned or reimaged host. Check first and rebuild whatever is missing, otherwise every cell for that model fails on adapter load:
 
 ```bash
-CUDA_HOME=/usr/local/cuda /usr/bin/python3.12 scripts/bench_vllm_backends.py \
+ls ~/model_ckpt/synthetic-loras/
+```
+
+Rebuild recipes (see the matrix's LoRA table for which model needs which):
+
+```bash
+# Synthetic adapter — any model PEFT can wrap.
+/usr/bin/python3.12 scripts/build_synthetic_lora.py \
+  --base RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic \
+  --out ~/model_ckpt/synthetic-loras/llama-3.2-3b-r16
+
+# Gemma 4 — PEFT can't wrap Gemma4ClippableLinear, so start from a real HF
+# adapter and strip its multimodal-tower weights (vLLM rejects those).
+SNAP=$(/usr/bin/python3.12 -c "from huggingface_hub import snapshot_download; print(snapshot_download('imranulhaquenoor/gemma4-e2b-urdu-tutor-lora'))" | tail -1)
+/usr/bin/python3.12 scripts/strip_tower_lora.py \
+  --src "$SNAP" --dst ~/model_ckpt/synthetic-loras/gemma-4-e2b-r16-stripped
+```
+
+A correct strip drops the `vision_tower.*` / `audio_tower.*` entries and keeps the language-tower ones — the script prints the kept/dropped counts, and dropped should be nonzero for a multimodal-trained adapter. E4B's pinned adapter (`Semaj90/gemma4-e4b-legal-grpo`) is already tower-clean and is passed straight as an HF id, so nothing to build for it.
+
+## Step 4: Run the sweep
+
+Pass each mapping via `--lora MODEL=LORA_HF_ID_OR_LOCAL_PATH`, and both input lengths via `--input_tokens`:
+
+```bash
+cd ~/llm-inference-exp
+export PATH=$HOME/.local/bin:$PATH   # torch.compile shells out to ninja; see Failure-recovery patterns
+CUDA_HOME=/usr/local/cuda nohup /usr/bin/python3.12 scripts/bench_vllm_backends.py \
+  --model prithivMLmods/gemma-4-E2B-it-FP8 \
   --model prithivMLmods/gemma-4-E4B-it-FP8 \
   --model RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic \
-  --model unsloth/Ministral-3-3B-Instruct-2512-FP8 \
   --backends FLASH_ATTN FLASHINFER TRITON_ATTN FLEX_ATTENTION \
+  --input_tokens 10000 100000 \
+  --num_runs 3 \
+  --lora prithivMLmods/gemma-4-E2B-it-FP8=$HOME/model_ckpt/synthetic-loras/gemma-4-e2b-r16-stripped \
   --lora prithivMLmods/gemma-4-E4B-it-FP8=Semaj90/gemma4-e4b-legal-grpo \
   --lora RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic=$HOME/model_ckpt/synthetic-loras/llama-3.2-3b-r16 \
-  --lora unsloth/Ministral-3-3B-Instruct-2512-FP8=$HOME/model_ckpt/synthetic-loras/ministral-3-3b-r16 \
-  --output /tmp/vllm_backend_matrix.json
+  --output /tmp/vllm_backend_matrix.json > /tmp/vllm_backend_matrix.out 2>&1 &
 ```
+
+`--input_tokens 10000 100000` and `--num_runs 3` are the script defaults; they're spelled out above so the invocation is self-documenting. **Swap the checkpoints for the ones matching this GPU's precision tier** (the ids above are the FP8 tier — see Step 2). Poll progress with `tail -f /tmp/vllm_backend_matrix.out`; per-cell results land in the JSON as they complete.
 
 If you're adding a new model, first try HF search for an existing adapter at r=16/α=16 (filter: `lora` tag + base model name; check `adapter_config.json` for `target_modules ⊇ {q,k,v,o,up,gate,down}_proj`, no `modules_to_save`, no `use_dora`, no `use_rslora`, no multimodal tower targets). If nothing on HF matches:
 
@@ -105,38 +176,48 @@ If you're adding a new model, first try HF search for an existing adapter at r=1
 
 Smoke-test the resulting adapter with the FP8 base model once, then add the mapping to both the matrix's LoRA table and the sweep invocation.
 
-This runs `N_models × N_backends × tiers-until-one-works` cells. With 4 backends and tiers averaging ~1.5 attempts per cell, expect roughly `4 × 1.5 = 6` runs per model. Each run is one full vLLM engine init + 5 timed iterations at 100k context — usually 2-5 minutes per cell, longer for larger models. A 3-model × 4-backend sweep on H100 is roughly 1-2 hours wall clock.
+This runs `N_models × N_backends × N_lengths × tiers-until-one-works` cells. With 4 backends, 2 lengths, and tiers averaging ~1.5 attempts, expect roughly `4 × 2 × 1.5 = 12` runs per model — though short-circuiting on length-invariant failures claws a good chunk of that back, since a backend a model outright rejects costs only its 10k attempt. Each run is one full vLLM engine init + `--num_runs` timed iterations; the 10k cells are much cheaper than the 100k ones. Budget **2-3 hours** wall clock for a 3-model × 4-backend × 2-length sweep, and note that engine init (not the timed iterations) dominates the 10k cells.
 
-Per-cell logs land in `/tmp/vllm_backend_matrix_logs/` for failure diagnosis.
+Per-cell logs land in `/tmp/vllm_backend_matrix_logs/` for failure diagnosis; the filename encodes model, backend, precision, KV dtype, **input length**, and adapter. The length matters: without it the 100k attempt overwrites the 10k log, so a cell that failed at 10k leaves behind the *wrong* log and reads as `unknown — see log` with no way to diagnose it short of re-running.
 
-## Step 4: Generate the markdown table
+## Step 5: Generate the markdown table
 
-The JSON output schema (per cell):
+The JSON output schema — note cells are keyed **`model → backend → input_tokens`**, with the length as a *string* key:
 ```json
-{
-  "chosen": {"precision": "fp8", "kv": "fp8"},  // or null on full failure
-  "attempts": [
-    {"precision": "fp8", "kv": "fp8", "status": "ok", "mean_ms": 3506.0, ...}
-  ]
+"cells": {
+  "<model>": {
+    "FLASH_ATTN": {
+      "10000":  {"chosen": {"precision": "fp8", "kv": "fp8"},
+                 "attempts": [{"precision": "fp8", "kv": "fp8", "status": "ok", "mean_ms": 412.0}]},
+      "100000": {"chosen": null,
+                 "attempts": [], "skipped": true, "reason": "head_size unsupported by backend"}
+    }
+  }
 }
 ```
 
-For each GPU table in `backend_compatibility.md`:
+A cell with `"skipped": true` was never executed — it inherited a length-invariant failure from a shorter length. Render it with the same `❌ <reason>` as its source cell; don't report it as untested.
+
+For each GPU section in `backend_compatibility.md`:
 
 1. **Header**: GPU name + compute capability + default precision (= first tier tried) + last-measured date.
-2. **Version block** immediately under the header: a small table of `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`, `cuda-driver`, `cuda-toolkit` versions from the JSON's `versions` field, plus a one-line note that `flash-attn` is vendored in vllm. Future runs of this skill diff against this block to detect drift.
-3. **Rows**: models, formatted as ``Friendly name (`hf-id`)``.
-4. **Columns**: backends.
-5. **Cells**:
-    - On success at default tier: `123 ms`
-    - On success at a non-default tier: `123 ms¹` with a numbered footnote explaining the precision deviation (e.g. *"FA cute kernel asserts on Q dtype with FP8 KV → uses BF16 KV."*)
-    - On failure: `❌ <reason>` (taken from the JSON's first-attempt failure reason)
-6. **Bold the fastest non-failing cell per row** to make backend selection obvious at a glance.
-7. **Footnotes**: precision deviations + relevant context (PRs, version dependencies, known issues).
+2. **Version block** immediately under the header: a small table of `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`, `cuda-driver`, `cuda-toolkit` versions from the JSON's `versions` field, plus a one-line note that `flash-attn` is vendored in vllm. Future runs of this skill diff against this block to detect drift. When `flashinfer-cubin` is absent the JSON records `null` — write `not installed (cubins fetched at runtime)`, not a blank.
+3. **One table per GPU**, with both lengths packed into each cell as `10k / 100k`. Don't split into per-length tables — the rows and columns are identical, so two tables just doubles the reading effort.
+4. **Rows**: models, formatted as ``Friendly name (`hf-id`)``. **Columns**: backends.
+5. **Cells** — `<10k> / <100k>`:
+    - Both lengths succeeded at the default tier: `168 / 12388`
+    - Success at a non-default tier: `168 / 12388¹` with a numbered footnote explaining the precision deviation (e.g. *"FA cute kernel asserts on Q dtype with FP8 KV → uses BF16 KV."*)
+    - Both lengths failed the same way (the common case, incl. `"skipped": true` inheriting a length-invariant reason): collapse to a single `❌ <reason>` rather than writing it twice.
+    - Lengths **diverged**: spell out both, e.g. `168 / ❌ OOM`. This is the interesting case — it means the failure is length-sensitive, and it deserves a Notes bullet.
+    - A length that wasn't measured: `—` on that side (e.g. `— / 12388`).
+6. **Bold the fastest non-failing cell per row, independently per length.** A row can legitimately have one backend bolded on the 10k side and a different one on the 100k side — bold only the number that won, not the whole cell.
+7. **Footnotes**: precision deviations + relevant context (PRs, version dependencies, known issues). Footnote numbering is per-GPU-section. Attach the marker to the specific number it applies to when a deviation affects only one length.
+8. **Call out any backend whose ranking flips between 10k and 100k** in the section's Notes — that inversion is the main reason both lengths are measured, and it's the thing a reader picking a production default most needs to see.
+9. Also add a Notes bullet for any cell where the two lengths *diverged* (worked at 10k, failed at 100k). A length-sensitive failure is a much more actionable finding than a flat rejection: it usually means an OOM budget or a kernel tiling bug rather than an unsupported shape.
 
 Read the existing file to preserve sections for other GPUs and the "How to read" preamble.
 
-## Step 5: Commit the matrix update
+## Step 6: Commit the matrix update
 
 Show the diff to the user before committing. If they confirm:
 
@@ -150,6 +231,14 @@ Per CLAUDE.md: do not commit unless explicitly asked.
 ## Failure-recovery patterns
 
 The script's classifier handles the common cases (head_size, kv_cache_dtype, FlashInfer template missing, FA cute Q-dtype assert, OOM, FlexAttention KV-sharing). If a new failure mode appears, add a new `(regex, label)` to the `patterns` list in `run_one()` rather than letting it fall through to "unknown — see log."
+
+**Never leave an `unknown — see log` cell in the table.** Open the log and find the root-cause line before recording anything: these are as often a broken host environment as a real incompatibility, and an unexamined one silently becomes a fake `❌` for a backend that actually works. The case that bit us: `FileNotFoundError: 'ninja'` during engine init, because the tool lives in `~/.local/bin` and that directory is **not on the PATH of a non-interactive ssh shell** — so the sweep failed where an interactive run succeeded. Export `PATH=$HOME/.local/bin:$PATH` in the sweep command, and verify build tools with `which ninja` over the *same* non-interactive channel the sweep uses, not from a login shell.
+
+**Distinguish "failed at engine init" from "failed while serving the request."** With chunked prefill disabled, `max_num_batched_tokens` equals `max_model_len`, so vLLM's profile run compiles *and Inductor-autotunes* at the full sweep length before any request is served. A length-gated crash can therefore live entirely in `LLM()` construction and have nothing to do with attention — which is why it looks backend-independent across the whole row. Grep the log for `Engine core initialization failed` to tell the two apart; only a failure during generation is evidence about a backend. Reproduce the init-time class with a bare `LLM(...)` and no `generate()` call — if that crashes, the backend column in the table is not the story.
+
+**Never trust the reported frame of an async CUDA error — re-run with `CUDA_LAUNCH_BLOCKING=1` before naming a kernel.** CUDA errors surface at the next synchronization point, not at the faulting launch, so the traceback routinely indicts an innocent kernel that merely happened to sync (Inductor's autotuner is a frequent false accusation, since it synchronizes constantly). We recorded a wrong root cause this way. Two cheap cross-checks on any accusation: read the *generated source* of the suspect kernel and confirm its offset arithmetic can actually overflow at the observed size, and check whether the failure lands on a `torch.cuda.synchronize()` in unrelated code.
+
+**A crash that scales with context length is usually 32-bit index overflow, and the threshold is computable.** Triton offsets from `tl.arange` are int32, so `tokens × row_stride_bytes` wraps at 2³¹. Divide 2³¹ by the byte stride of the widest per-token activation and bisect around that number — if the empirical PASS/CRASH boundary brackets the predicted token count, the diagnosis is essentially proven and the bug report can say so instead of guessing. Bisect on `max_model_len` with everything else fixed.
 
 If a cell unexpectedly takes much longer than expected (e.g. 30s for a 4B model where we'd expect ~5s), that's worth a profile dive — note it and follow up with the `profile-llm` skill rather than just recording the number.
 
