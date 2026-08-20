@@ -30,12 +30,14 @@ The adapter is keyed to the **model family**, not to a specific checkpoint: each
 | Model family | LoRA adapter | r / α | Source |
 |---|---|---|---|
 | Gemma 4 E4B | `Semaj90/gemma4-e4b-legal-grpo` | 16 / 16 | HF (real). Already excludes `vision_tower.*`, `audio_tower.*`, `multi_modal_projector.*`. |
-| Gemma 4 E2B | `~/model_ckpt/synthetic-loras/gemma-4-e2b-r16-stripped` | 16 / 16 | HF `imranulhaquenoor/gemma4-e2b-urdu-tutor-lora` (r=16/α=16) post-processed by `scripts/strip_tower_lora.py` to drop `vision_tower.*` / `audio_tower.*` / `multi_modal_projector.*` weights (the source LoRA was trained on the full multimodal model). |
+| Gemma 4 E2B | `tekkaadan/litcoin-gemma-mobile` | 16 / 16 | HF (real). Natively language-model-only — 410 tensors, 24.2M params, no tower weights, so no post-processing needed. |
 | Llama 3.2 3B | `~/model_ckpt/synthetic-loras/llama-3.2-3b-r16` | 16 / 16 | Synthetic (built by `scripts/build_synthetic_lora.py`; random weights). |
 
 Local adapter paths under `~/model_ckpt/synthetic-loras/` are **machine-local and not in git** — they won't exist on a freshly provisioned host and must be rebuilt before a sweep (the skill's Step 3 covers this).
 
-The Gemma 4 rows use real HF adapters because PEFT can't currently wrap Gemma 4's `Gemma4ClippableLinear` (raises *"Target module ... is not supported"*) — we can't generate one synthetically. The E4B row's adapter happens to be tower-clean already; the E2B row's adapter needed a post-process pass (`scripts/strip_tower_lora.py`) to drop multimodal-tower weights that vLLM rejects.
+The Gemma 4 rows use real HF adapters because PEFT can't currently wrap Gemma 4's `Gemma4ClippableLinear` (raises *"Target module ... is not supported"*) — we can't generate one synthetically. Both pinned Gemma 4 adapters are tower-clean as published, so neither needs post-processing; `scripts/strip_tower_lora.py` stays available for adapters that aren't.
+
+Matching r/α is not sufficient — the adapter's **module scope and per-layer coverage** determine punica cost. Public E2B adapters at r=16/α=16 range from ~2.7M to ~48M params depending on whether they also adapt the vision/audio towers and whether they carry `k_proj`/`v_proj` on every layer (E2B shares KV across layers, so a language-only adapter has k/v on only 15 of 35 layers). Compare tensor and param counts against the target production adapter, not just the config.
 
 To regenerate the synthetic adapter (e.g. when the base model is replaced), run:
 
@@ -51,7 +53,7 @@ Synthetic-weight performance is identical to real-weight performance (LoRA dispa
 
 ## NVIDIA H100 80GB HBM3 (SM90, Hopper)
 
-Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-08-19**.
+Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-08-19**; the Gemma 4 E2B row was re-measured **2026-08-20** (new LoRA adapter + the footnote-³ patch).
 
 | Package | Version |
 |---|---|
@@ -65,18 +67,20 @@ Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-08-
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
-**Version-drift note:** this section and the SM120 section are on the same stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those two are comparable. The L40S, B200, and A100 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed.
+**vLLM local patch in effect for the E2B 100k cells:** the int64 row-index cast from [vllm#53034](https://github.com/vllm-project/vllm/pull/53034), applied to `vllm/lora/ops/triton_ops/kernel_utils.py` in the installed 0.27.1. Without it those cells crash — see footnote ³. Every other cell in this table is stock.
+
+**Version-drift note:** this section and the SM120 section are on the same stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those two are comparable. The L40S, B200, and A100 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed. `flashinfer-python` 0.6.17 is available but is ahead of vLLM 0.27.1's own pin; refresh both 0.27.1 sections together when adopting it.
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E2B (`prithivMLmods/gemma-4-E2B-it-FP8`) | **150**¹ / ❌ illegal memory access³ | ❌ not implemented on SM90⁴ | 235 / ❌ illegal memory access³ | ❌ KV sharing not supported⁵ |
+| Gemma 4 E2B (`prithivMLmods/gemma-4-E2B-it-FP8`) | **154**¹ / **3181**¹˒³ | ❌ not implemented on SM90⁴ | 238 / 12490³ | ❌ KV sharing not supported⁵ |
 | Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | **223**¹ / **3858**¹ | ❌ not implemented on SM90⁴ | 316 / 13599² | ❌ KV sharing not supported⁵ |
 | Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | 158 / **4002** | **154** / ❌ OOM⁶ | 393 / 26508 | 675 / ❌ OOM⁶ |
 
 **Footnotes**:
 - ¹ FA on Gemma 4 (`head_dim=512`) rejects FP8 KV on Hopper (`FP8 is only supported on SM100 for FA4 CuTe`), so these cells fall back to **BF16 KV cache** (`fp8 + auto KV`). Every other working cell in the table uses FP8 KV.
 - ² TRITON_ATTN on Gemma 4 `head_dim=512` is not tuned for this shape — the `head_dim≥512` tile/warp tuning from [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) is still absent from the bundled `triton_unified_attention.py`, which has been rewritten twice since. Expect ~3.5× FA on E4B at 100k until it is re-upstreamed.
-- ³ Gemma 4 E2B + LoRA dies at 100k with `an illegal memory access was encountered` on **both** working backends, at 10k it is fine. This is not an attention bug: with `CUDA_LAUNCH_BLOCKING=1` the faulting launch is vLLM's own LoRA punica kernel (`lora_expand_op.py`), and it fires during the engine-init profile run before any request is served. It reproduces identically on SM120 — see that section's footnote for the full root cause. Filed as [vllm#53028](https://github.com/vllm-project/vllm/issues/53028) with a one-line fix in [vllm#53034](https://github.com/vllm-project/vllm/pull/53034); the ❌ cells reflect **stock** 0.27.1.
+- ³ **These two 100k cells require a patched vLLM and do not run on any release.** On stock 0.27.1, Gemma 4 E2B + LoRA dies at 100k with `an illegal memory access was encountered` on both working backends (10k is fine). It is not an attention bug: with `CUDA_LAUNCH_BLOCKING=1` the faulting launch is vLLM's own LoRA punica kernel (`lora_expand_op.py`), firing during the engine-init profile run before any request is served. It reproduces identically on SM120 — see that section's footnote for the root cause and the exact length boundary. Filed as [vllm#53028](https://github.com/vllm-project/vllm/issues/53028) with a two-line fix in [vllm#53034](https://github.com/vllm-project/vllm/pull/53034), which is **still open and unmerged** as of this measurement; the numbers above were taken with that patch applied to the installed 0.27.1. Re-measure once it lands, and treat any release before then as ❌ for these cells.
 - ⁴ FLASHINFER reaches dispatch for `head_dim=512` (the whitelist from [vllm#38822](https://github.com/vllm-project/vllm/pull/38822) is in) but then fails with *not implemented* because the prebuilt cubins for that head_dim target Blackwell SM100+ only. Still unusable for Gemma 4 on Hopper.
 - ⁵ FLEX rejects FP8 KV outright, and on its BF16-KV fallback tier it rejects Gemma 4's sliding/global KV sharing. No viable tier for Gemma 4 on this GPU.
 - ⁶ FLASHINFER's post-init multi-GB workspace and FLEX's compile-time block-mask metadata both push past 80 GB at 100k on the BF16-KV tier. Lowering `--gpu_memory_utilization` may unblock them; the default config does not.
@@ -84,10 +88,11 @@ If any of these has a newer release, the table below is likely stale — rerun t
 **Notes**:
 - All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard projection modules). See the "LoRA adapters used for every benchmark" table near the top of this file.
 - **FLASH_ATTN is the backend to reach for on Hopper**, at both lengths and on every model it accepts — including Gemma 4, where it now beats TRITON_ATTN by ~3.5× at 100k (it was the only Gemma-capable option in this stack besides Triton). Note it pays a 2× KV-memory cost on Gemma 4 via the BF16-KV fallback.
-- **FLASHINFER is competitive only at short context** (marginally ahead of FA on Llama at 10k) and OOMs at 100k on this card. On Hopper it is a fallback, not a default — the opposite of SM120, where it wins.
+- **FLASHINFER is competitive only at short context** (marginally ahead of FA on Llama at 10k) and OOMs at 100k on this card. On Hopper it is a fallback, not a default — unlike SM120, where it wins on Llama and E4B.
 - TRITON_ATTN is the universal fallback: it runs every shape that runs at all, and it is the only way to keep FP8 KV on Gemma 4 here, but it is 1.5-6.6× slower than FA.
 - FLEX_ATTENTION is not viable on Hopper — rejects FP8 KV everywhere, rejects Gemma 4's KV sharing, and OOMs at 100k on its one working model.
-- **Gemma 4 E2B at 100k is currently unbenchmarkable on Hopper *and* consumer Blackwell** because of the LoRA-kernel crash in footnote ³. If you need long-context E2B today, run it without LoRA.
+- **Gemma 4 E2B at 100k needs a patched vLLM** (footnote ³) on Hopper *and* consumer Blackwell. On any current release, run long-context E2B without LoRA or stay under ~87k tokens.
+- **On E2B, FA's ~3.9× lead over TRITON_ATTN at 100k** (3181 vs 12490) is the widest gap in this table — the same `head_dim=512` Triton tuning gap as footnote ², and it costs FA the BF16-KV fallback.
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM (`SHORT_CONV`, `LINEAR`, `GDN_ATTN`) backends are not applicable to standard dense LLMs on NVIDIA datacenter GPUs.
 
 ---
@@ -130,7 +135,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 ## NVIDIA RTX PRO 6000 Blackwell Server Edition (SM120, Consumer Blackwell)
 
-Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-08-19**.
+Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-08-19**; the Gemma 4 E2B row was re-measured **2026-08-20** (new LoRA adapter + the footnote-⁴ patch).
 
 | Package | Version |
 |---|---|
@@ -144,11 +149,13 @@ Default precision: **FP4 W4A4 weights + FP8 KV cache**. Last measured **2026-08-
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
-**Version-drift note:** this section and the H100 section are on the same stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those two are comparable. The L40S, B200, and A100 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed.
+**vLLM local patch in effect for the E2B 100k cells:** the int64 row-index cast from [vllm#53034](https://github.com/vllm-project/vllm/pull/53034), applied to `vllm/lora/ops/triton_ops/kernel_utils.py` in the installed 0.27.1. Without it those cells crash — see footnote ⁴. Every other cell in this table is stock.
+
+**Version-drift note:** this section and the H100 section are on the same stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those two are comparable. The L40S, B200, and A100 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed. `flashinfer-python` 0.6.17 is available but is ahead of vLLM 0.27.1's own pin; refresh both 0.27.1 sections together when adopting it.
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E2B (`Neural-ICE/Gemma-4-E2B-it-NVFP4`) | ❌ kv_cache_dtype² | 167 / ❌ illegal memory access⁴ | **163** / ❌ illegal memory access⁴ | ❌ kv_cache_dtype |
+| Gemma 4 E2B (`Neural-ICE/Gemma-4-E2B-it-NVFP4`) | ❌ kv_cache_dtype² | 165 / 4902³˒⁴ | **163** / **4743**⁴ | ❌ kv_cache_dtype |
 | Gemma 4 E4B (`cosmicproc/gemma-4-E4B-it-NVFP4`) | ❌ kv_cache_dtype² | **230** / **5608**³ | 244 / 6730 | ❌ KV sharing not supported |
 | Llama 3.2 3B Instruct (local NVFP4, modelopt from `unsloth/Llama-3.2-3B-Instruct`) | 177 / 6844¹ | **174** / **6008** | 257 / 14860 | 461 / ❌ OOM⁵ |
 
@@ -157,12 +164,13 @@ All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard proje
 **Footnotes**:
 - ¹ FA's cute kernel asserts on Q dtype when KV cache is FP8 on SM120 → falls back to **BF16 KV cache** for this cell (`fp4 + auto KV`). All other working cells use FP8 KV. On the previous stack FA still won at 100k despite the 2× KV memory; it no longer does (see Notes). Watch for vllm/flashinfer updates that fix this assert.
 - ² FA doesn't work for Gemma 4 at *any* KV dtype on SM120 because Gemma 4's full-attention layers have `global_head_dim=512` (sliding-attention layers use 256). FA's SM120 build requires FA4 to support `head_size > 256`, which isn't available here. With FP8 KV the `kv_cache_dtype` check fires first; on E4B with BF16 KV the head_size check fires instead.
-- ³ This cell OOMs at the default `gpu_memory_utilization` and only runs at **0.75** — FlashInfer allocates a multi-GB workspace *after* engine init, by which point vLLM has already sized the KV cache to fill the budget. Latency is insensitive to the budget (Llama × FLASHINFER measured 174 / 5999 at 0.75 vs 174 / 6008 at 0.92), so this number is comparable to the rest of the table.
-- ⁴ Gemma 4 E2B runs fine at 10k but dies with `an illegal memory access was encountered` at 100k on **two independent backends**, and identically on H100. Root-caused: it is not an attention bug. Under `CUDA_LAUNCH_BLOCKING=1` the faulting launch is vLLM's own LoRA punica kernel (`lora_expand_op.py`), and it fires inside the engine-init profile run — a bare `LLM(..., enable_lora=True)` with no adapter and no request is enough. It needs `enable_lora=True` *and* a long `max_model_len`. Bisecting the length gives an exact boundary of **87383** tokens — the kernel's token-row index is int32, and `2**31 / 24576 = 87383`, where 24576 is the byte stride of one row of E2B's merged `gate_up` activation. Not a memory-budget artifact — still crashes at `gpu_memory_utilization 0.75`. Filed as [vllm#53028](https://github.com/vllm-project/vllm/issues/53028); fixed by casting the row index to int64 ([vllm#53034](https://github.com/vllm-project/vllm/pull/53034)), after which E2B at 100k runs at **4832 ms** on FLASHINFER and **4675 ms** on TRITON_ATTN with no latency cost at lengths that already worked. The ❌ cells reflect **stock** 0.27.1.
+- ³ These cells OOM at the default `gpu_memory_utilization` and only run at **0.75** — FlashInfer allocates a multi-GB workspace *after* engine init, by which point vLLM has already sized the KV cache to fill the budget. Latency is insensitive to the budget (Llama × FLASHINFER measured 174 / 5999 at 0.75 vs 174 / 6008 at 0.92), so these numbers are comparable to the rest of the table. Both Gemma 4 rows need it: E2B fails at the default budget at *both* lengths, and the failure is a 1 GiB sampling-buffer allocation with ~640 MiB free, identically on the FP8-KV and BF16-KV tiers. Worth knowing that the budget also decides the *precision* the harness lands on: at the default budget E2B's FP8-KV tier OOMs and the run silently falls back to BF16 KV, whereas at 0.75 it keeps FP8 KV. A backend that appears to "reject" a KV dtype here may just be out of memory — check the per-cell log before recording a dtype gate.
+- ⁴ **These two 100k cells require a patched vLLM and do not run on any release.** On stock 0.27.1, Gemma 4 E2B runs fine at 10k but dies with `an illegal memory access was encountered` at 100k on **two independent backends**, and identically on H100. Root-caused: it is not an attention bug. Under `CUDA_LAUNCH_BLOCKING=1` the faulting launch is vLLM's own LoRA punica kernel (`lora_expand_op.py`), and it fires inside the engine-init profile run — a bare `LLM(..., enable_lora=True)` with no adapter and no request is enough. It needs `enable_lora=True` *and* a long `max_model_len`. Bisecting the length gives an exact boundary of **87383** tokens — the kernel's token-row index is int32, and `2**31 / 24576 = 87383`, where 24576 is the byte stride of one row of E2B's merged `gate_up` activation. Not a memory-budget artifact — it still crashes at `gpu_memory_utilization 0.75`. Filed as [vllm#53028](https://github.com/vllm-project/vllm/issues/53028); fixed by casting the row index to int64 ([vllm#53034](https://github.com/vllm-project/vllm/pull/53034)), which is **still open and unmerged** as of this measurement. The numbers above were taken with that patch applied to the installed 0.27.1; it costs nothing at lengths that already worked. Re-measure once it lands, and treat any release before then as ❌ for these cells.
 - ⁵ FLEX at 100k OOMs on its only viable tier (`fp4 + auto`, i.e. BF16 KV — FLEX refuses FP8 KV) and still OOMs at `gpu_memory_utilization 0.75`.
 
 **Notes**:
-- **FLASHINFER is now the best backend on SM120 for every model it accepts**, at both lengths. This is a reversal: on `vllm 0.22.1` / `flashinfer 0.6.12`, FA won on Llama at 100k (6885 vs 7244); on 0.27.1 / 0.6.16.post3 FLASHINFER wins (6008 vs 6844). Re-check this ordering after every flashinfer bump.
+- **FLASHINFER is the best backend on SM120 for Llama and E4B**, at both lengths. This is a reversal: on `vllm 0.22.1` / `flashinfer 0.6.12`, FA won on Llama at 100k (6885 vs 7244); on 0.27.1 / 0.6.16.post3 FLASHINFER wins (6008 vs 6844). Re-check this ordering after every flashinfer bump.
+- **E2B is the exception: TRITON_ATTN wins there** at both lengths (163 / 4743 vs 165 / 4902), and it does so at the default memory budget while FLASHINFER needs 0.75. The margin is a few percent, so treat them as equivalent on E2B and prefer Triton for the simpler config.
 - **FLASHINFER also now runs Gemma 4 E4B**, and beats TRITON_ATTN there (5608 vs 6730 at 100k). The head_size=512 kernel-template miss that blocked it on flashinfer 0.6.12 is fixed. TRITON_ATTN is no longer the only backend that runs Gemma 4 here.
 - **FLASH_ATTN** still rejects Gemma 4 entirely (`global_head_dim=512` needs FA4, unavailable on SM120) and is now second-best on dense GQA.
 - **TRITON_ATTN** is the universal fallback — it runs everything that runs at all, but is ~2.5× slower than FLASHINFER on dense GQA.

@@ -137,15 +137,16 @@ Rebuild recipes (see the matrix's LoRA table for which model needs which):
 /usr/bin/python3.12 scripts/build_synthetic_lora.py \
   --base RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic \
   --out ~/model_ckpt/synthetic-loras/llama-3.2-3b-r16
-
-# Gemma 4 — PEFT can't wrap Gemma4ClippableLinear, so start from a real HF
-# adapter and strip its multimodal-tower weights (vLLM rejects those).
-SNAP=$(/usr/bin/python3.12 -c "from huggingface_hub import snapshot_download; print(snapshot_download('imranulhaquenoor/gemma4-e2b-urdu-tutor-lora'))" | tail -1)
-/usr/bin/python3.12 scripts/strip_tower_lora.py \
-  --src "$SNAP" --dst ~/model_ckpt/synthetic-loras/gemma-4-e2b-r16-stripped
 ```
 
-A correct strip drops the `vision_tower.*` / `audio_tower.*` entries and keeps the language-tower ones — the script prints the kept/dropped counts, and dropped should be nonzero for a multimodal-trained adapter. E4B's pinned adapter (`Semaj90/gemma4-e4b-legal-grpo`) is already tower-clean and is passed straight as an HF id, so nothing to build for it.
+The Gemma 4 rows need nothing built — both pinned adapters are real HF ids that are already language-model-only, so they're passed straight through. If you swap in a Gemma 4 adapter that *was* trained on the full multimodal model (safetensors contains `vision_tower.*` / `audio_tower.*` keys — vLLM rejects those), run it through `scripts/strip_tower_lora.py` first:
+
+```bash
+SNAP=$(/usr/bin/python3.12 -c "from huggingface_hub import snapshot_download; print(snapshot_download('<hf-id>'))" | tail -1)
+/usr/bin/python3.12 scripts/strip_tower_lora.py --src "$SNAP" --dst ~/model_ckpt/synthetic-loras/<name>
+```
+
+A correct strip drops the tower entries and keeps the language ones — the script prints kept/dropped counts, and dropped should be nonzero for a multimodal-trained adapter. Prefer a natively tower-free adapter over stripping: stripping leaves whatever per-layer coverage the source had, which may not match production (see the caveat below).
 
 ## Step 4: Run the sweep
 
@@ -161,7 +162,7 @@ CUDA_HOME=/usr/local/cuda nohup /usr/bin/python3.12 scripts/bench_vllm_backends.
   --backends FLASH_ATTN FLASHINFER TRITON_ATTN FLEX_ATTENTION \
   --input_tokens 10000 100000 \
   --num_runs 3 \
-  --lora prithivMLmods/gemma-4-E2B-it-FP8=$HOME/model_ckpt/synthetic-loras/gemma-4-e2b-r16-stripped \
+  --lora prithivMLmods/gemma-4-E2B-it-FP8=tekkaadan/litcoin-gemma-mobile \
   --lora prithivMLmods/gemma-4-E4B-it-FP8=Semaj90/gemma4-e4b-legal-grpo \
   --lora RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic=$HOME/model_ckpt/synthetic-loras/llama-3.2-3b-r16 \
   --output /tmp/vllm_backend_matrix.json > /tmp/vllm_backend_matrix.out 2>&1 &
@@ -173,6 +174,8 @@ If you're adding a new model, first try HF search for an existing adapter at r=1
 
 - **Generate a synthetic adapter** via `scripts/build_synthetic_lora.py` (random weights, identical compute shape). Works for any model PEFT can wrap.
 - For Gemma 4 family (`Gemma4ClippableLinear` blocks PEFT from generating one), pick the cleanest real HF adapter at r=16/α=16. If it was trained on the full multimodal model (`unsloth_fixed=true` / safetensors contains `audio_tower.*` / `vision_tower.*` keys), run it through **`scripts/strip_tower_lora.py`** to drop the tower entries before vLLM will accept it.
+
+**Rank and alpha alone do not pin the LoRA workload.** Punica cost scales with how many tensors the adapter actually carries, so check the safetensors key set and param count, not just `adapter_config.json`. Two things vary widely between adapters at the same r/α: whether the towers are adapted (an order-of-magnitude difference), and per-layer coverage of `k_proj`/`v_proj` — a model with cross-layer KV sharing only *has* k/v on a subset of layers, but a regex-targeted adapter may still emit them for every layer. Pick the adapter whose key set matches the deployment you're modelling; a mismatch silently benchmarks a heavier or lighter LoRA than production.
 
 Smoke-test the resulting adapter with the FP8 base model once, then add the mapping to both the matrix's LoRA table and the sweep invocation.
 
@@ -239,6 +242,10 @@ The script's classifier handles the common cases (head_size, kv_cache_dtype, Fla
 **Never trust the reported frame of an async CUDA error — re-run with `CUDA_LAUNCH_BLOCKING=1` before naming a kernel.** CUDA errors surface at the next synchronization point, not at the faulting launch, so the traceback routinely indicts an innocent kernel that merely happened to sync (Inductor's autotuner is a frequent false accusation, since it synchronizes constantly). We recorded a wrong root cause this way. Two cheap cross-checks on any accusation: read the *generated source* of the suspect kernel and confirm its offset arithmetic can actually overflow at the observed size, and check whether the failure lands on a `torch.cuda.synchronize()` in unrelated code.
 
 **A crash that scales with context length is usually 32-bit index overflow, and the threshold is computable.** Triton offsets from `tl.arange` are int32, so `tokens × row_stride_bytes` wraps at 2³¹. Divide 2³¹ by the byte stride of the widest per-token activation and bisect around that number — if the empirical PASS/CRASH boundary brackets the predicted token count, the diagnosis is essentially proven and the bug report can say so instead of guessing. Bisect on `max_model_len` with everything else fixed.
+
+**An apparent dtype rejection can really be an OOM, and the memory budget silently decides which precision tier you measure.** The harness walks tiers until one succeeds and only annotates the *winning* tier, so a cell can quietly land on BF16 KV because the FP8-KV tier ran out of memory rather than because the backend refused the dtype — and FP8 KV makes this *more* likely, since smaller blocks mean vLLM allocates more of them to fill `gpu_memory_utilization`, leaving nothing for a backend that grabs its workspace after engine init. Before recording a KV-dtype gate, open the losing tier's per-cell log and confirm the reason. If it is an OOM, re-measure at `--gpu_memory_utilization 0.75` and footnote it, rather than reporting a precision the hardware never refused.
+
+**Verify a surprising failure on a confirmed-idle GPU before recording it.** A cell that contradicts an earlier measurement of the same configuration is a measurement artifact until proven otherwise — a previous engine still releasing memory is enough to turn a working cell into an OOM. Check `nvidia-smi --query-gpu=memory.used` and `--query-compute-apps=pid,used_memory` are both empty, then re-run that cell alone. Also delete `/tmp/vllm_backend_matrix_logs/` before a re-run, so logs from a killed sweep can't be mistaken for the new one's.
 
 If a cell unexpectedly takes much longer than expected (e.g. 30s for a 4B model where we'd expect ~5s), that's worth a profile dive — note it and follow up with the `profile-llm` skill rather than just recording the number.
 
