@@ -47,7 +47,7 @@ To regenerate the synthetic adapter (e.g. when the base model is replaced), run:
   --out ~/model_ckpt/synthetic-loras/llama-3.2-3b-r16
 ```
 
-Synthetic-weight performance is identical to real-weight performance (LoRA dispatch only cares about r/α/target_modules, not the weight values), so this lets us match `r/α` across models without hunting for an HF adapter at every desired rank.
+Synthetic-weight performance is identical to real-weight performance (LoRA dispatch only cares about r/α/target_modules, not the weight values), so this lets us match `r/α` across models without hunting for an HF adapter at every desired rank. For the same reason the `--base` can be **any** Llama-3.2-3B checkpoint — BF16 or quantized — since only the module dimensions are read; use whichever is already cached rather than downloading the one named above. Building it needs `peft`, which is not a vLLM dependency: install it with `--no-deps` so it can't drag `transformers` back to a version vLLM rejects.
 
 ---
 
@@ -69,7 +69,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 **vLLM local patch in effect for the E2B 100k cells:** the int64 row-index cast from [vllm#53034](https://github.com/vllm-project/vllm/pull/53034), applied to `vllm/lora/ops/triton_ops/kernel_utils.py` in the installed 0.27.1. Without it those cells crash — see footnote ³. Every other cell in this table is stock.
 
-**Version-drift note:** this section and the SM120 section are on the same stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those two are comparable. The L40S, B200, and A100 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed. `flashinfer-python` 0.6.17 is available but is ahead of vLLM 0.27.1's own pin; refresh both 0.27.1 sections together when adopting it.
+**Version-drift note:** this section, the SM120 section, and the A100 section are on the same pip stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those three are comparable — with the caveat that A100 is one CUDA driver/toolkit behind. The L40S and B200 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed. `flashinfer-python` 0.6.17 is available but is ahead of vLLM 0.27.1's own pin; refresh all three 0.27.1 sections together when adopting it.
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
@@ -81,7 +81,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 - ¹ FA on Gemma 4 (`head_dim=512`) rejects FP8 KV on Hopper (`FP8 is only supported on SM100 for FA4 CuTe`), so these cells fall back to **BF16 KV cache** (`fp8 + auto KV`). Every other working cell in the table uses FP8 KV.
 - ² TRITON_ATTN on Gemma 4 `head_dim=512` is not tuned for this shape — the `head_dim≥512` tile/warp tuning from [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) is still absent from the bundled `triton_unified_attention.py`, which has been rewritten twice since. Expect ~3.5× FA on E4B at 100k until it is re-upstreamed.
 - ³ **These two 100k cells require a patched vLLM and do not run on any release.** On stock 0.27.1, Gemma 4 E2B + LoRA dies at 100k with `an illegal memory access was encountered` on both working backends (10k is fine). It is not an attention bug: with `CUDA_LAUNCH_BLOCKING=1` the faulting launch is vLLM's own LoRA punica kernel (`lora_expand_op.py`), firing during the engine-init profile run before any request is served. It reproduces identically on SM120 — see that section's footnote for the root cause and the exact length boundary. Filed as [vllm#53028](https://github.com/vllm-project/vllm/issues/53028) with a two-line fix in [vllm#53034](https://github.com/vllm-project/vllm/pull/53034), which is **still open and unmerged** as of this measurement; the numbers above were taken with that patch applied to the installed 0.27.1. Re-measure once it lands, and treat any release before then as ❌ for these cells.
-- ⁴ FLASHINFER reaches dispatch for `head_dim=512` (the whitelist from [vllm#38822](https://github.com/vllm-project/vllm/pull/38822) is in) but then fails with *not implemented* because the prebuilt cubins for that head_dim target Blackwell SM100+ only. Still unusable for Gemma 4 on Hopper.
+- ⁴ FLASHINFER reaches dispatch for `head_dim=512` (the whitelist from [vllm#38822](https://github.com/vllm-project/vllm/pull/38822) is in) but then fails with *not implemented*. Unusable for Gemma 4 on Hopper. **The "Blackwell-only cubins" explanation is now in doubt:** the A100 section runs Gemma 4 under FLASHINFER on the *same* flashinfer 0.6.16.post3, and SM80 is older than SM90 — so head_dim=512 coverage can't simply be SM100+. The likelier discriminator is the **KV dtype**: Hopper defaults to FP8 KV here while Ampere uses BF16 KV, and the FP8-KV head_dim=512 path is the one that needs trtllm-gen cubins. Unresolved — re-test FLASHINFER on H100 with a forced BF16 KV cache on the next refresh before repeating either claim.
 - ⁵ FLEX rejects FP8 KV outright, and on its BF16-KV fallback tier it rejects Gemma 4's sliding/global KV sharing. No viable tier for Gemma 4 on this GPU.
 - ⁶ FLASHINFER's post-init multi-GB workspace and FLEX's compile-time block-mask metadata both push past 80 GB at 100k on the BF16-KV tier. Lowering `--gpu_memory_utilization` may unblock them; the default config does not.
 
@@ -125,7 +125,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 - ³ FA's cute kernel-path Q-dtype assert isn't reachable here (FA2 instead of FA4), but FA2 itself rejects FP8 KV for these models → falls back to **BF16 KV cache** for this cell. FLASHINFER's cell uses default FP8 KV.
 
 **Notes**:
-- **TRITON_ATTN is the only working backend for Gemma 4** on Ada (head_dim=512 has no FA2 / FlashInfer support).
+- **TRITON_ATTN is the only working backend for Gemma 4** on Ada (head_dim=512 has no FA2 / FlashInfer support). The FlashInfer half of that claim is from a 0.21.0-era stack and is **probably stale** — a newer flashinfer runs Gemma 4 on SM80 (see the A100 section); re-check when this section is refreshed.
 - For Llama 3.2 3B, FLASH_ATTN (with BF16-KV fallback) is the fastest, with FLASHINFER close behind at default FP8/FP8. TRITON_ATTN is ~2.5× slower.
 - **46 GB is tight at 100k context** — this is the smallest card in the file, and a model that fits everywhere else can still OOM here across every backend. When a whole row comes back OOM, drop `--max_model_len`, lower `--gpu_memory_utilization`, or use a shorter context on L40S rather than reading it as a backend incompatibility.
 - Gemma 4 E2B has not been measured on this GPU yet — rerun the `vllm-backend-matrix` skill on an L40S to fill the row.
@@ -151,7 +151,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 **vLLM local patch in effect for the E2B 100k cells:** the int64 row-index cast from [vllm#53034](https://github.com/vllm-project/vllm/pull/53034), applied to `vllm/lora/ops/triton_ops/kernel_utils.py` in the installed 0.27.1. Without it those cells crash — see footnote ⁴. Every other cell in this table is stock.
 
-**Version-drift note:** this section and the H100 section are on the same stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those two are comparable. The L40S, B200, and A100 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed. `flashinfer-python` 0.6.17 is available but is ahead of vLLM 0.27.1's own pin; refresh both 0.27.1 sections together when adopting it.
+**Version-drift note:** this section, the H100 section, and the A100 section are on the same pip stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3` / `triton 3.7.1`), so those three are comparable — with the caveat that A100 is one CUDA driver/toolkit behind. The L40S and B200 rows are still on 0.21.0-era stacks and are **not** apples-to-apples until refreshed. `flashinfer-python` 0.6.17 is available but is ahead of vLLM 0.27.1's own pin; refresh all three 0.27.1 sections together when adopting it.
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
@@ -225,40 +225,48 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 ## NVIDIA A100 SXM4 80GB (SM80, Ampere)
 
-Default precision: **INT8 W8A8 weights + BF16 KV cache**. Last measured **2026-05-23**.
+Default precision: **INT8 W8A8 weights + BF16 KV cache**. Last measured **2026-08-20**.
 
 | Package | Version |
 |---|---|
-| `vllm` | 0.21.0 |
-| `flashinfer-python` | 0.6.11.post3 |
-| `flashinfer-cubin` | 0.6.11.post3 |
-| `triton` | 3.6.0 |
+| `vllm` | 0.27.1 |
+| `flashinfer-python` | 0.6.16.post3 |
+| `flashinfer-cubin` | not installed (cubins fetched at runtime) |
+| `triton` | 3.7.1 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
-| `cuda-driver` | _(not recorded — rerun matrix on this GPU to capture)_ |
-| `cuda-toolkit` | _(not recorded — rerun matrix on this GPU to capture)_ |
+| `cuda-driver` | 595.71.05 |
+| `cuda-toolkit` | 13.2 |
 
 If any of these has a newer release, the table below is likely stale — rerun the `vllm-backend-matrix` skill.
 
-**Version-drift note:** `flashinfer-python` / `flashinfer-cubin` 0.6.11.post3 here matches the B200 section. The H100 and SM120 sections are now on a **newer** stack (`vllm 0.27.1` / `flashinfer 0.6.16.post3`) and L40S on an older one, so this row should be refreshed on A100 hardware before comparing across GPUs.
+**Version-drift note:** the pip stack now matches the H100 and SM120 sections exactly, so those three GPUs are directly comparable. This host is still one driver/toolkit behind them (`595.71.05` / `13.2` vs `610.43.02` / `13.3`), and driver/toolkit bumps can change JIT codegen — so read small cross-GPU deltas with that caveat. `flashinfer-python` 0.6.17 is available but is ahead of vLLM 0.27.1's own pin; refresh all three 0.27.1 sections together when adopting it.
 
-**Precision-drift note:** Ampere has **no native FP8 or FP4 tensor cores** — those paths would fall back to BF16 dequant and defeat the point. INT8 tensor cores have been available since Turing (SM 7.5), so W8A8 INT8 (CompressedTensors `int-quantized`) is the natural quantized baseline. `kv_cache_dtype=auto` resolves to **BF16** here (the model's compute dtype); vLLM's FP8 KV path requires an FP8-capable SM (≥ 8.9).
+**Precision-drift note:** Ampere has **no native FP8 or FP4 tensor cores** — those paths would fall back to BF16 dequant and defeat the point. INT8 tensor cores have been available since Turing (SM 7.5), so W8A8 INT8 (CompressedTensors `int-quantized`) is the natural quantized baseline. `kv_cache_dtype=auto` resolves to **BF16** here (the model's compute dtype); vLLM's FP8 KV path requires an FP8-capable SM (≥ 8.9). Ampere therefore has a **single precision tier with no fallbacks**, so unlike the Blackwell sections no cell here can silently land on a different precision than the header claims.
+
+**vLLM local patch in effect:** the int64 row-index cast from [vllm#53034](https://github.com/vllm-project/vllm/pull/53034), applied to `vllm/lora/ops/triton_ops/kernel_utils.py` in the installed 0.27.1 — the same patch as the H100 and SM120 sections, and still open and unmerged when measured. The overflow it fixes is in a Triton kernel and is GPU-independent, so the Gemma 4 E2B 100k cells would be expected to crash without it; that was not re-verified here, since the patch was applied before the sweep.
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E2B (`glenic/gemma-4-E2B-it-W8A8-INT8`) | _not measured_ | _not measured_ | _not measured_ | _not measured_ |
-| Gemma 4 E4B (`nunusadmqk/gemma-4-E4B-it-W8A8-INT8-v10-datafree`) | ❌ head_size unsupported¹ | ❌ head_size=512 unsupported | — / **20923** | ❌ KV-sharing not supported |
-| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-quantized.w8a8`) | — / 11463 | — / **10508** | — / 40756 | ❌ OOM² |
+| Gemma 4 E2B (`glenic/gemma-4-E2B-it-W8A8-INT8`) | ❌ head_size unsupported¹ | **351** / **9291**² | 459 / 17945 | ❌ KV sharing not supported³ |
+| Gemma 4 E4B (`nunusadmqk/gemma-4-E4B-it-W8A8-INT8-v10-datafree`) | ❌ head_size unsupported¹ | **492** / **10778**² | 614 / 19878 | ❌ KV sharing not supported³ |
+| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-quantized.w8a8`) | 364 / 12274 | **363**⁴ / **11380**² | 615 / 37643 | 1153 / ❌ OOM⁵ |
 
 **Footnotes**:
-- ¹ On Ampere, the vendored FA uses **FlashAttention v2** (FA-cute / FA4 are Hopper+). FA2 rejects `head_dim>256`, so Gemma 4's global-attention layers (`head_dim=512`) trip the head-size check. Same pattern as the L40S section. FLASHINFER rejects for the same reason on this SM.
-- ² FLEX_ATTENTION OOMs at 100k on Ampere even with 80 GB headroom — the compile-time block-mask metadata plus BF16 KV cache exceed any reasonable utilization budget. Same pattern as the H100 (80 GB) section. Lower `--gpu_memory_utilization` or shorter context could unblock it; default config does not.
+- ¹ On Ampere, the vendored FA uses **FlashAttention v2** (FA-cute / FA4 are Hopper+). FA2 rejects `head_dim>256`, so Gemma 4's global-attention layers (`head_dim=512`) trip the head-size check. Same pattern as the L40S section.
+- ² Measured at `--gpu_memory_utilization 0.75`. At the default 0.92 **all three of these cells report OOM**: the KV cache expands to 47–51 GiB to fill the budget, and FlashInfer's post-init workspace (1.9–4.6 GiB depending on model) then finds nothing left. This is a budget artifact, not a capability limit — latency is insensitive to the budget once the model fits, so these numbers are comparable to the rest of the table.
+- ³ FlexAttention rejects Gemma 4's cross-layer KV sharing — a length-invariant configuration rejection, identical at both lengths.
+- ⁴ Within run-to-run noise of FLASH_ATTN's 364 ms; treat 10k on Llama as a tie between the two rather than a FlashInfer win.
+- ⁵ FLEX_ATTENTION runs at 10k but OOMs at 100k **even at 0.75**, so unlike the FlashInfer cells this one is a real limit: the compile-time block-mask metadata plus BF16 KV cache don't fit at 100k on 80 GB.
 
 **Notes**:
-- **FLASHINFER is the default on A100** for W8A8 INT8 long-context prefill — modestly ahead of FA on dense models. vLLM picks `CutlassInt8ScaledMMLinearKernel` for the linear-layer matmul; attention runs in BF16 against the BF16 KV cache.
-- **FLASH_ATTN** uses the FA2 codepath on Ampere (FA-cute / FA4 are Hopper+). Works on dense models but trails FlashInfer here; rejects Gemma 4 outright (no `head_dim>256` support in FA2).
-- **TRITON_ATTN** is ~3.5–4× slower than FlashInfer/FA — last-resort baseline. It's also the **only working backend for Gemma 4 on Ampere** because no other backend supports `head_dim=512` on SM 8.x.
-- **FLEX_ATTENTION** is unusable at 100k on Ampere across the board: rejects Gemma 4's sliding/global KV-sharing, OOMs on the dense models even with 80 GB of HBM. Same pattern as the H100 row.
-- **80 GB is comfortable** — only FLEX runs out of memory; all FlashInfer/FA/Triton cells that compile run cleanly with default `--gpu_memory_utilization=0.92`. Multimodal checkpoints that keep a BF16 vision tower need the larger card; on 40 GB they OOM across all backends.
-- Gemma 4 E2B has not been measured on this GPU yet — rerun the `vllm-backend-matrix` skill on an A100 to fill the row.
+- **FLASHINFER is the default on A100** — fastest at both lengths for all three models, provided you drop the memory budget to 0.75 at 100k (footnote ²). vLLM picks `CutlassInt8ScaledMMLinearKernel` for the linear-layer matmul; attention runs in BF16 against the BF16 KV cache.
+- **"Triton is the only backend that works for Gemma 4 on Ampere" is no longer true.** FLASHINFER now accepts `head_dim=512` on SM80 and is ~1.8–1.9× faster than TRITON_ATTN at 100k on both Gemma models. The durable lesson: **a head-size rejection is a fact about a specific FlashInfer version's cubin coverage, not a property of the SM** — recheck it after every FlashInfer bump instead of treating it as a permanent hardware limit.
+- **Gemma 4 under FLASHINFER works on SM80 but not SM90, on identical flashinfer 0.6.16.post3** — an inversion worth understanding before assuming newer hardware is strictly more capable. Since SM80 is the *older* architecture, `head_dim=512` support can't be gated purely on SM version; the difference is most likely the KV dtype (Ampere is forced to BF16 KV, Hopper defaults to FP8 KV, and the FP8-KV head_dim=512 path is the one needing trtllm-gen cubins). Not yet confirmed — see H100 footnote ⁴.
+- **The expensive mistake on this GPU is trusting a default-budget OOM.** Taken at face value, the 0.92 sweep says FlashInfer is unusable at 100k and Triton is the only option; the 0.75 retest says FlashInfer is the fastest backend by ~2× on Gemma. A backend that allocates its workspace *after* engine init will always lose a race against a KV cache sized to fill the budget.
+- **TRITON_ATTN** is the portable fallback and always runs, but costs 1.8–1.9× (Gemma) to 3.3× (Llama) versus the best backend at 100k. Its 10k penalty is much smaller, so it's a more defensible choice for short-prompt traffic than the 100k column suggests.
+- **FLASH_ATTN** uses the FA2 codepath on Ampere. It ties FlashInfer at 10k on the dense model and trails it ~8% at 100k, and rejects both Gemma 4 checkpoints outright.
+- **No ranking flip between 10k and 100k on this GPU** — FLASHINFER wins or ties at both lengths for every model (it ties FLASH_ATTN at 10k on Llama). That makes A100 simpler to configure than SM120, where the winner depends on the model.
+- **FLEX_ATTENTION diverges by length on the dense model** (1153 ms at 10k, OOM at 100k) and is rejected outright on both Gemma models. It is not a viable long-context backend on Ampere.
+- **80 GB is not as roomy as it looks at 100k.** Only TRITON_ATTN and FLASH_ATTN run at the default 0.92; FlashInfer needs 0.75 and FLEX doesn't fit at all. Multimodal checkpoints that keep a BF16 vision tower need the larger card; on 40 GB they OOM across all backends.
 - **INT8 W8A8 vs other quant schemes**: vLLM picks `CutlassInt8ScaledMMLinearKernel` for the matmul; attention runs in BF16 against the BF16 KV cache. INT8 activations are quantized per-token dynamically (the `int-quantized` strategy with `act_group_size=-1`).
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM backends are not applicable here.

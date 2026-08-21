@@ -39,6 +39,7 @@ Parse optional repeatable `--model <hf_id>`, `--backends <NAME ...>`, and `--inp
   ```
 
   Latency is largely insensitive to the budget once the model fits (a control cell moved <0.2% between 0.92 and 0.75), so a retest number is comparable to the rest of the table — record it with a footnote naming the budget it needed. Getting this wrong is expensive in the other direction too: it can bury the *fastest* backend for a model behind a fake incompatibility. Retest crashes the same way: if an illegal-memory-access or CUBLAS failure survives a lower budget, you've earned the right to record it as a real kernel bug instead of hedging.
+- **A `head_size unsupported` rejection is a fact about the installed FlashInfer version, not about the GPU.** These backends dispatch to a kernel/cubin set that only covers certain head dims, and coverage is added release by release — an exotic head_dim that FLASHINFER rejected on one sweep can be *fastest* on the same card a few FlashInfer versions later. So a `❌ head_size` cell has a shelf life: re-run it after every FlashInfer bump instead of copying it forward, and word the footnote as "rejected at flashinfer X.Y.Z", never "unsupported on this SM". Corollary: if the same model+backend works on an *older* SM than one where it fails, coverage cannot be SM-gated — look for another discriminator (KV dtype is the usual one, since FP8-KV and BF16-KV take different kernel paths) and record the contradiction rather than inventing a hardware explanation.
 - **A failure reproduced on two independent backends is a property of the model, not the backends.** When the same signature (illegal memory access, CUBLAS crash) appears at the same input length under, say, both FLASHINFER and TRITON_ATTN, stop looking for a backend explanation — it's the model's shape at that context length. Say so in the footnote; a reader deciding "which backend do I pick" needs to know that switching backends won't help.
 - **`kill -0 <pid>` fails with EPERM across users**, so a watcher loop like `while kill -0 $PID; do sleep 60; done` exits instantly — and looks exactly like "the sweep finished" — if you're logged in as a different user than the one that launched it. Confirm ownership (`ps -o user= -p $PID`) before trusting a wait loop.
 - **Failures short-circuit across input lengths.** Lengths are swept ascending; a cell that fails at 10k for a length-invariant reason (dtype gate, head_size, backend-selection rejection) is not re-run at 100k — it inherits the reason and is marked `"skipped": true` in the JSON. Length-*sensitive* failures (OOM, CUBLAS / illegal-address crashes, missing FlashInfer cubins, timeouts) always re-run, because they legitimately differ between 10k and 100k. Pass `--no_short_circuit` to force every length.
@@ -49,10 +50,13 @@ The script chooses tiers from `nvidia-smi --query-gpu=compute_cap`:
 
 | Compute capability | Tier order tried (precision, kv_cache) |
 |---|---|
+| SM 8.0 / 8.6 (Ampere) | `(int8, auto-BF16)` — single tier, no fallback |
 | SM 8.9 (Ada), SM 9.0 (Hopper) | `(fp8, fp8)` → `(fp8, auto-BF16)` |
 | SM 10.0/10.3 (Blackwell datacenter), SM 12.x (Blackwell consumer) | `(fp4, fp8)` → `(fp4, auto)` → `(fp8, fp8)` → `(fp8, auto)` |
 
 First success wins. Any cell that uses a non-default tier is annotated in the matrix footnote.
+
+Ampere has no native FP8/FP4 tensor cores, so INT8 W8A8 is the only sensible tier and there is **nothing to fall back to**. That makes Ampere sweeps easier to trust: with one tier, no cell can quietly land on a different precision than the section header claims, so the "an apparent dtype rejection is really an OOM" trap below can't silently change the *precision* you measured — only whether the cell ran at all.
 
 A **pre-quantized checkpoint only supports the precision it was built at** — an NVFP4 checkpoint rejects the `fp8` tiers with *"requested precision 'fp8' does not match model's built-in precision 'fp4'"*. The script learns this from the first such rejection and skips the remaining mismatched tiers (recorded as `skipped — checkpoint is fp4-only`), so the effective tier count on Blackwell is 2 (KV-dtype fallbacks), not 4. This is why the checkpoint must match the GPU's tier (Step 2): a checkpoint at the wrong precision doesn't fall back gracefully, it fails the whole row.
 
@@ -138,6 +142,16 @@ Rebuild recipes (see the matrix's LoRA table for which model needs which):
   --base RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic \
   --out ~/model_ckpt/synthetic-loras/llama-3.2-3b-r16
 ```
+
+Two things bite on a fresh host:
+
+- **`peft` is not a vLLM dependency**, so `build_synthetic_lora.py` fails with `ModuleNotFoundError: No module named 'peft'`. Install it **with `--no-deps`** — peft pins an older `transformers` than recent vLLM needs and a plain install will happily downgrade it out from under the engine. On a PEP 668 host (`error: externally-managed-environment`) add `--user --break-system-packages`, matching how the rest of these site-packages were installed:
+
+  ```bash
+  /usr/bin/python3.12 -m pip install --user --break-system-packages --no-deps peft
+  ```
+
+- **`--base` can be any checkpoint from the same family** — the script only reads module dimensions to shape the LoRA, and the adapter carries random weights regardless. Point it at whatever base is already in the HF cache (a BF16 one is fine) instead of downloading the precision-matched checkpoint just to build an adapter.
 
 The Gemma 4 rows need nothing built — both pinned adapters are real HF ids that are already language-model-only, so they're passed straight through. If you swap in a Gemma 4 adapter that *was* trained on the full multimodal model (safetensors contains `vision_tower.*` / `audio_tower.*` keys — vLLM rejects those), run it through `scripts/strip_tower_lora.py` first:
 
