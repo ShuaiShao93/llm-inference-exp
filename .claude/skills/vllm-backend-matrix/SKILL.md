@@ -68,8 +68,11 @@ Override the tier list by editing `detect_precision_tiers()` in the helper scrip
 nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader
 /usr/local/cuda/bin/nvcc --version | tail -3
 /usr/bin/python3.12 -c "
-import importlib.metadata as md
-for p in ['vllm', 'flashinfer-python', 'flashinfer-cubin', 'triton']:
+import importlib.metadata as md, sys
+print(f'python: {sys.version.split()[0]}')
+assert sys.version_info >= (3, 12), 'flashinfer needs 3.12+ — see the Python version trap below'
+import flashinfer.comm  # must not raise; vLLM imports this for every backend
+for p in ['vllm', 'flashinfer-python', 'flashinfer-cubin', 'triton', 'transformers']:
     try:    print(f'{p}: {md.version(p)}')
     except: print(f'{p}: not installed')
 "
@@ -78,10 +81,26 @@ grep -B1 -A10 'NVIDIA' backend_compatibility.md | head -60
 
 Then diff the live versions against the version block in the matching GPU section of `backend_compatibility.md`. The version block tracks:
 
-- pip packages: `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`
+- pip packages: `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`, `transformers`
+- interpreter: `python`
 - system: `cuda-driver` (from `nvidia-smi --query-gpu=driver_version`), `cuda-toolkit` (from `nvcc --version`)
 
 (`flash-attn` is vendored inside vllm and tracks the vllm version; no separate check.)
+
+`transformers` and `python` are recorded because vLLM's pins are loose enough that a fresh install can differ from the env a section was measured on. `transformers` in particular only has a lower bound, and a newer one can break a model during config validation — *before* backend selection, so it presents as every cell for that model failing on every backend. If a whole model row fails identically across all four backends, check `transformers` against the recorded version before suspecting the GPU.
+
+### The Python version trap
+
+**flashinfer requires Python 3.12+, and vLLM will not tell you.** flashinfer's `comm` module uses annotations that only parse on 3.12+ (subscripted stdlib types evaluated at import time), and vLLM imports `flashinfer.comm` unconditionally while building its compilation passes — so on 3.10/3.11 **every model fails at engine init on every backend**, including FLASH_ATTN and TRITON_ATTN runs that never touch flashinfer. The classifier reports `unknown — see log` for all cells, and the traceback names `flashinfer`, which reads like a FLASHINFER-specific problem rather than an interpreter problem. Note vllm's own wheels are `abi3` and install happily on older interpreters, so pip gives no warning.
+
+If the host's default interpreter is older than 3.12, get a standalone one instead of mutating system apt (these hosts hold large TRT-LLM engine caches you don't want to risk):
+
+```bash
+uv python install 3.12
+"$(uv python find 3.12)" -m venv ~/vllm-venv
+```
+
+Then run every command in this skill through `~/vllm-venv/bin/python`. `bench_vllm_backends.py` launches its subprocesses with `sys.executable`, so the venv propagates automatically. Record the interpreter version in the GPU section's version block.
 
 ### The flashinfer two-package trap
 
@@ -218,7 +237,7 @@ A cell with `"skipped": true` was never executed — it inherited a length-invar
 For each GPU section in `backend_compatibility.md`:
 
 1. **Header**: GPU name + compute capability + default precision (= first tier tried) + last-measured date.
-2. **Version block** immediately under the header: a small table of `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`, `cuda-driver`, `cuda-toolkit` versions from the JSON's `versions` field, plus a one-line note that `flash-attn` is vendored in vllm. Future runs of this skill diff against this block to detect drift. When `flashinfer-cubin` is absent the JSON records `null` — write `not installed (cubins fetched at runtime)`, not a blank.
+2. **Version block** immediately under the header: a small table of `vllm`, `flashinfer-python`, `flashinfer-cubin`, `triton`, `cuda-driver`, `cuda-toolkit` versions from the JSON's `versions` field, plus `transformers` and `python` from the Step 1 check, plus a one-line note that `flash-attn` is vendored in vllm. Future runs of this skill diff against this block to detect drift. When `flashinfer-cubin` is absent the JSON records `null` — write `not installed (cubins fetched at runtime)`, not a blank.
 3. **One table per GPU**, with both lengths packed into each cell as `10k / 100k`. Don't split into per-length tables — the rows and columns are identical, so two tables just doubles the reading effort.
 4. **Rows**: models, formatted as ``Friendly name (`hf-id`)``. **Columns**: backends.
 5. **Cells** — `<10k> / <100k>`:
