@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local raw benchmark output (audit trail only; tables live in backend_compatibility.md)
+.bench-results/

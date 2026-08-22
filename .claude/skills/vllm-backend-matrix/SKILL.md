@@ -102,6 +102,16 @@ uv python install 3.12
 
 Then run every command in this skill through `~/vllm-venv/bin/python`. `bench_vllm_backends.py` launches its subprocesses with `sys.executable`, so the venv propagates automatically. Record the interpreter version in the GPU section's version block.
 
+### The PATH trap (build tools invisible to the JIT)
+
+**Driving a venv's python by absolute path does NOT put that venv's `bin` on `PATH`.** flashinfer's JIT shells out to `ninja` and `nvcc` as *subprocesses*, so neither is found — even though `ninja` installs as a vLLM pip dependency into the very venv you're invoking. Every cell then dies at engine init with `FileNotFoundError: 'ninja'`, which the classifier records as `unknown — see log`, so the result JSON reads as a wall of genuine backend incompatibilities. Nothing in the error text mentions `PATH`. Export both before sweeping:
+
+```bash
+export PATH="$VENV/bin:/usr/local/cuda/bin:$PATH"
+```
+
+More generally: **when a whole sweep fails identically, suspect the environment before the hardware.** Smoke-test a single cell after any env change — one cell costs a minute, a full matrix costs 1-2h.
+
 ### The flashinfer two-package trap
 
 `flashinfer-cubin` is **optional and not a vLLM dependency** — vLLM only requires `flashinfer-python`. FlashInfer resolves its cubins in this order (`flashinfer/jit/env.py:_get_cubin_dir`):
@@ -187,7 +197,7 @@ Pass each mapping via `--lora MODEL=LORA_HF_ID_OR_LOCAL_PATH`, and both input le
 
 ```bash
 cd ~/llm-inference-exp
-export PATH=$HOME/.local/bin:$PATH   # torch.compile shells out to ninja; see Failure-recovery patterns
+export PATH=$HOME/.local/bin:/usr/local/cuda/bin:$PATH   # ninja + nvcc must be findable as subprocesses; see "The PATH trap"
 CUDA_HOME=/usr/local/cuda nohup /usr/bin/python3.12 scripts/bench_vllm_backends.py \
   --model prithivMLmods/gemma-4-E2B-it-FP8 \
   --model prithivMLmods/gemma-4-E4B-it-FP8 \
