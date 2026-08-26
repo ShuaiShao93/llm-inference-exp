@@ -81,16 +81,16 @@ Cost per request at each GPU's **best backend** for that model and length:
 | **RTX PRO 6000** | FP8 W8A8 (online) | 3.363 | Gemma 4 E2B | 184 ms | 0.0172 | 4914 ms | 0.459 |
 | | | | Gemma 4 E4B | 279 ms | 0.0260 | 6013 ms | 0.562 |
 | | | | Llama 3.2 3B | 208 ms | 0.0195 | 6440 ms | 0.602 |
-| **L40S** | FP8 W8A8 | 2.242 | Gemma 4 E2B | 373 ms | 0.0232 | 8514 ms | 0.530 |
-| | | | Gemma 4 E4B | 558 ms | 0.0348 | 10544 ms | 0.657 |
-| | | | Llama 3.2 3B | 402 ms | 0.0250 | 11012 ms | 0.686 |
+| **L40S** | FP8 W8A8 (online) | 2.242 | Gemma 4 E2B | 372 ms | 0.0232 | 8577 ms | 0.534 |
+| | | | Gemma 4 E4B | 562 ms | 0.0350 | 10545 ms | 0.657 |
+| | | | Llama 3.2 3B | 404 ms | 0.0252 | 10757 ms | 0.670 |
 | **B200**† | FP4 W4A4 | 14.242 | Gemma 4 E2B | 114 ms | 0.0451 | 1394 ms | 0.551 |
 | | | | Gemma 4 E4B | 150 ms | 0.0593 | 1708 ms | 0.676 |
 | | | | Llama 3.2 3B | 102 ms | 0.0404 | 1763 ms | 0.697 |
 | **B200**† | FP8 W8A8 | 14.242 | all three | — not measured‡ | — | — not measured‡ | — |
-| **H100** | FP8 W8A8 | 6.880 | Gemma 4 E2B | 154 ms | 0.0294 | 3181 ms | 0.608 |
-| | | | Gemma 4 E4B | 223 ms | 0.0426 | 3858 ms | 0.737 |
-| | | | Llama 3.2 3B | 154 ms | 0.0294 | 4002 ms | 0.765 |
+| **H100** | FP8 W8A8 (online) | 6.880 | Gemma 4 E2B | 152 ms | 0.0291 | 3134 ms | 0.599 |
+| | | | Gemma 4 E4B | 224 ms | 0.0428 | 3861 ms | 0.738 |
+| | | | Llama 3.2 3B | 155 ms | 0.0296 | 3453 ms | 0.660 |
 | **A100 80GB**† | INT8 W8A8 | 3.431 | Gemma 4 E2B | 348 ms | 0.0332 | 9388 ms | 0.895 |
 | | | | Gemma 4 E4B | 492 ms | 0.0469 | 10756 ms | 1.025 |
 | | | | Llama 3.2 3B | 362 ms | 0.0345 | 11423 ms | 1.089 |
@@ -99,11 +99,11 @@ Cost per request at each GPU's **best backend** for that model and length:
 
 What this says:
 
-- **The RTX PRO 6000 is the cost-optimal card at both context lengths, on every model.** It is neither the fastest nor the cheapest per hour, but it is the only card that is *both* FP4-capable and priced like a workstation GPU. At 100k on E2B: RTX 0.443 ¢, L40S 0.530 (1.20×), B200 0.551 (1.25×), H100 0.608 (1.37×), A100 0.895 (2.02×).
-- **And it wins on cost even handicapped to FP8, so this is not an FP4 artifact.** At matched FP8 W8A8, RTX is 0.459 ¢/req at 100k on E2B against the L40S's 0.530 (1.15×) and the H100's 0.608 (1.32×) — and RTX-in-FP8 still beats B200-in-FP4 (0.551). Dropping the RTX to FP8 costs only 4–7% more per request at 100k, far less than the 13–21% it costs at 10k, so the precision choice barely moves the cross-GPU ranking at long context.
+- **The RTX PRO 6000 is the cost-optimal card at both context lengths, on every model.** It is neither the fastest nor the cheapest per hour, but it is the only card that is *both* FP4-capable and priced like a workstation GPU. At 100k on E2B: RTX 0.443 ¢, L40S 0.534 (1.21×), B200 0.551 (1.25×), H100 0.599 (1.35×), A100 0.895 (2.02×).
+- **And it wins on cost even handicapped to FP8, so this is not an FP4 artifact.** At matched FP8 W8A8, RTX is 0.459 ¢/req at 100k on E2B against the L40S's 0.534 (1.16×) and the H100's 0.599 (1.31×) — and RTX-in-FP8 still beats B200-in-FP4 (0.551). Dropping the RTX to FP8 costs only 4–7% more per request at 100k, far less than the 13–21% it costs at 10k, so the precision choice barely moves the cross-GPU ranking at long context.
 - **Pay for a B200 to buy latency, not throughput-per-dollar.** It is 3.4× faster than the RTX at 100k but costs 4.2× more per hour, so it loses on cost while winning decisively on time-to-first-token. It is the right choice only when the 1.4 s response is worth the premium.
 - **A100 is the worst cost-per-request at both lengths** and is dominated on every axis by the RTX PRO 6000, which is cheaper per hour *and* ~2× faster. Ampere is not a cost-effective choice for this workload.
-- **The gaps narrow as context grows.** The L40S is 1.53× the RTX's cost at 10k but only 1.20× at 100k, because the cheap-slow card claws back ground once latency is dominated by prefill compute rather than fixed overhead. Extrapolating past 100k, the cheapest card keeps closing — but we have not measured beyond 100k, so that is a trend, not a projection.
+- **The gaps narrow as context grows.** The L40S is 1.53× the RTX's cost at 10k but only 1.21× at 100k, because the cheap-slow card claws back ground once latency is dominated by prefill compute rather than fixed overhead. Extrapolating past 100k, the cheapest card keeps closing — but we have not measured beyond 100k, so that is a trend, not a projection.
 - **Instance sizing changes the answer**, which is why the ≥2xlarge floor is stated rather than assumed: on the `g6e.xlarge` (4 vCPU) the L40S prices at 1.861 $/GPU-hr and ties the RTX at 100k. That instance is too CPU-starved to trust for prefill-heavy serving, so the honest comparison uses the 2xlarge and the RTX wins outright.
 
 Caveats that materially affect these numbers:
@@ -247,7 +247,9 @@ Same GPU, same host, same stack, same adapters, same `max_lora_rank` — only th
 
 ## NVIDIA H100 80GB HBM3 (SM90, Hopper)
 
-Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-08-19**; the Gemma 4 E2B row was re-measured **2026-08-20** (new LoRA adapter + the footnote-³ patch).
+Default precision: **FP8 W8A8 weights (quantized online from the BF16 base, `--precision fp8_per_channel`) + FP8 KV cache**. Last measured **2026-08-25**.
+
+Every cell here uses the **default** memory budget except Llama × FLASHINFER at 100k, which needs `--gpu_memory_utilization 0.75` (footnote ⁶).
 
 | Package | Version |
 |---|---|
@@ -256,6 +258,8 @@ Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-08-
 | `flashinfer-cubin` | not installed (cubins fetched at runtime) |
 | `triton` | 3.7.1 |
 | `flash-attn` | vendored in vllm (tracks vllm version) |
+| `transformers` | 5.9.0 (must be < 5.15.0) |
+| `python` | 3.12.3 (3.12+ required) |
 | `cuda-driver` | 610.43.02 |
 | `cuda-toolkit` | 13.3 |
 
@@ -263,24 +267,26 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E2B (`prithivMLmods/gemma-4-E2B-it-FP8`) | **154**¹ / **3181**¹˒³ | ❌ not implemented on SM90⁴ | 238 / 12490³ | ❌ KV sharing not supported⁵ |
-| Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | **223**¹ / **3858**¹ | ❌ not implemented on SM90⁴ | 316 / 13599² | ❌ KV sharing not supported⁵ |
-| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | 158 / **4002** | **154** / ❌ OOM⁶ | 393 / 26508 | 675 / ❌ OOM⁶ |
+| Gemma 4 E2B (`google/gemma-4-E2B-it`) | **152**¹ / **3134**¹˒³ | ❌ SM90 sliding-window guard⁴ | 238 / 12409³ | ❌ KV sharing not supported⁵ |
+| Gemma 4 E4B (`google/gemma-4-E4B-it`) | **224**¹ / **3861**¹ | ❌ SM90 sliding-window guard⁴ | 322 / 13609² | ❌ KV sharing not supported⁵ |
+| Llama 3.2 3B Instruct (`unsloth/Llama-3.2-3B-Instruct`) | 159 / 4005 | **155** / **3453**⁶ | 390 / 26521 | 673⁵ / ❌ OOM⁷ |
 
 **Footnotes**:
-- ¹ FA on Gemma 4 (`head_dim=512`) rejects FP8 KV on Hopper (`FP8 is only supported on SM100 for FA4 CuTe`), so these cells fall back to **BF16 KV cache** (`fp8 + auto KV`). Every other working cell in the table uses FP8 KV.
+- ¹ FA on Gemma 4 (`head_dim=512`) rejects FP8 KV on Hopper (`FP8 is only supported on SM100 for FA4 CuTe`), so these cells fall back to **BF16 KV cache** (`fp8 + auto KV`). Every other working cell uses FP8 KV except FLEX's (footnote ⁵).
 - ² TRITON_ATTN on Gemma 4 `head_dim=512` is not tuned for this shape — the `head_dim≥512` tile/warp tuning from [vllm#43257](https://github.com/vllm-project/vllm/pull/43257) is still absent from the bundled `triton_unified_attention.py`, which has been rewritten twice since. Expect ~3.5× FA on E4B at 100k until it is re-upstreamed.
 - ³ **These two 100k cells require the int64 punica patch and do not run on any release** — see *Stack and patches*. Both working backends fail identically here without it.
-- ⁴ FLASHINFER reaches dispatch for `head_dim=512` (the whitelist from [vllm#38822](https://github.com/vllm-project/vllm/pull/38822) is in) but then fails with *not implemented*. Unusable for Gemma 4 on Hopper. **The "Blackwell-only cubins" explanation is now in doubt:** the A100 section runs Gemma 4 under FLASHINFER on the *same* flashinfer 0.6.16.post3, and SM80 is older than SM90 — so head_dim=512 coverage can't simply be SM100+. The likelier discriminator is the **KV dtype**: Hopper defaults to FP8 KV here while Ampere uses BF16 KV, and the FP8-KV head_dim=512 path is the one that needs trtllm-gen cubins. **The L40S refresh supports this** — on Ada, FLASHINFER's FP8-KV tier for Gemma 4 fails inside flashinfer's JIT arch-flag helper with `No supported CUDA architectures found for major versions [10, 11, 12]` (that path is gated to CC 10.x+), while its BF16-KV tier runs fine. That is a KV-dtype-specific arch gate, not a blanket head_dim=512 gate. Still unresolved for Hopper specifically, since the failure mode there is *not implemented* rather than the arch-flag error — re-test FLASHINFER on H100 with a forced BF16 KV cache on the next refresh before repeating either claim.
-- ⁵ FLEX rejects FP8 KV outright, and on its BF16-KV fallback tier it rejects Gemma 4's sliding/global KV sharing. No viable tier for Gemma 4 on this GPU.
-- ⁶ FLASHINFER's post-init workspace and FLEX's compile-time block-mask metadata both push past 80 GB at 100k on the BF16-KV tier. **The L40S section recovers the FLASHINFER cell at 0.75** — on a smaller card, no less — while leaving FLEX OOMed, so this FLASHINFER cell is likely a budget artifact and deserves a 0.75 retest on the next H100 refresh.
+- ⁴ **Resolved: this is an explicit SM90 guard on sliding-window attention, not a head_dim or KV-dtype limit.** vLLM raises `FlashInfer backend on SM90 currently crashes with sliding-window attention layers` from `v1/attention/backends/flashinfer.py`, gated on `current_platform.is_device_capability(90)` and *any* layer with `window_left != -1` ([flashinfer#3578](https://github.com/flashinfer-ai/flashinfer/issues/3578)). It fires before dispatch, so `head_dim=512` never enters the picture — Gemma 4 is blocked here purely for having sliding-window layers, and Llama 3.2 (no sliding window) runs FLASHINFER fine on the same card. **Both earlier explanations in this footnote were wrong and are retracted**: it is not Blackwell-only cubins, and it is not the KV dtype. Forcing BF16 KV fails identically, which is the test the previous version of this footnote asked for. The rest of the file is consistent with an SM90-only guard: A100 (SM80) and SM120 don't trip it at all, and Ada's Gemma 4 failure is a *different* mechanism confined to the FP8-KV tier (L40S footnote ³). Note the guard is broader than its own justification — the comment blames FP8-Q, but the check never inspects the Q dtype.
+- ⁵ FLEX rejects FP8 KV outright on every model, so its one working cell (Llama 10k) is on a **BF16 KV cache**; on that same BF16-KV fallback it additionally rejects Gemma 4's sliding/global KV sharing, leaving no viable tier for Gemma 4 on this GPU.
+- ⁶ **This cell is a budget artifact, now confirmed.** It previously read ❌ OOM: FLASHINFER allocates its workspace after engine init and loses the race against a KV cache sized to fill the default budget (see *How to read an OOM*). At `--gpu_memory_utilization 0.75` it runs, and it is the **fastest** Llama 100k cell on this card. The L40S section predicted this by recovering the same cell at 0.75 on a *smaller* card; that prediction is what prompted the retest.
+- ⁷ FLEX at 100k still OOMs at 0.75 (4.66 GiB request), so unlike footnote ⁶ this is a real limit rather than a budget artifact — its compile-time block-mask metadata plus a BF16 KV cache do not fit at 100k. Both the L40S and A100 sections report this same cell failing the same way at 0.75.
 
 **Notes**:
 - All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard projection modules). See the "LoRA adapters used for every benchmark" table near the top of this file.
-- **FLASH_ATTN is the backend to reach for on Hopper**, at both lengths and on every model it accepts — including Gemma 4, where it now beats TRITON_ATTN by ~3.5× at 100k (it was the only Gemma-capable option in this stack besides Triton). Note it pays a 2× KV-memory cost on Gemma 4 via the BF16-KV fallback.
-- **FLASHINFER is competitive only at short context** (marginally ahead of FA on Llama at 10k) and OOMs at 100k on this card. On Hopper it is a fallback, not a default — unlike SM120, where it wins on Llama and E4B.
-- TRITON_ATTN is the universal fallback: it runs every shape that runs at all, and it is the only way to keep FP8 KV on Gemma 4 here, but it is 1.5-6.6× slower than FA.
-- FLEX_ATTENTION is not viable on Hopper — rejects FP8 KV everywhere, rejects Gemma 4's KV sharing, and OOMs at 100k on its one working model.
+- **FLASH_ATTN is the backend to reach for on Gemma 4 on Hopper**, at both lengths, where it beats TRITON_ATTN by ~3.5-4× at 100k and is the only alternative to Triton (FLASHINFER and FLEX both refuse Gemma 4 outright, footnotes ⁴ and ⁵). Note it pays a 2× KV-memory cost there via the BF16-KV fallback.
+- **FLASHINFER is the backend to reach for on Llama, at both lengths — a reversal of the previous reading of this card.** It now wins 100k by ~14% (3453 vs FA's 4005) as well as 10k, once given `gpu_memory_utilization 0.75`. The old "competitive only at short context, OOMs at 100k" verdict was a memory-budget artifact, not a property of the backend (footnote ⁶). **This is the clearest case in the file for the rule that an OOM is a budget symptom until proven otherwise** — the artifact had inverted the backend ranking on this GPU's most common model.
+- TRITON_ATTN is the universal fallback: it runs every shape that runs at all, and it is the only way to keep FP8 KV on Gemma 4 here, but it is 1.6-6.6× slower than the best alternative.
+- FLEX_ATTENTION is not viable on Hopper — rejects FP8 KV everywhere, rejects Gemma 4's KV sharing, and is the one cell that genuinely OOMs at 100k even at 0.75 (footnote ⁷).
+- **Online quantization is latency-neutral here.** All 16 cells were re-measured against BF16 bases with `--precision fp8_per_channel`; every cell that was already passing lands within **1.8% of the offline FP8 checkpoint it replaced**, and every ❌ cell fails for the same reason. The only table change beyond noise is footnote ⁶'s recovered cell, which came from the memory budget rather than the precision.
 - **Gemma 4 E2B at 100k needs a patched vLLM** (footnote ³) on Hopper *and* consumer Blackwell. On any current release, run long-context E2B without LoRA or stay under ~87k tokens.
 
 **LoRA A/B on this GPU** (2026-08-24, Gemma 4 E2B FP8 / FLASH_ATTN / BF16 KV, stock punica configs, `--max_lora_rank 16`, 3 runs each, run-to-run spread ≤0.3%):
@@ -292,17 +298,17 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 Fitting both points gives a small fixed per-forward overhead (~6 ms) and a marginal cost of ~1384 GB/s of LoRA traffic — see the cross-GPU table above, and its warning that these percentages do not transfer between cards.
 
-**These are faster than the matrix row above (154 / 3181) because the matrix ran `max_lora_rank=64`.** A same-session control at r=64 gives 150.4 / 3100.9, closing the gap to +2.4% / +2.6% — ordinary variance on a shared host. See the rank-padding section above: the 4× rank padding alone is worth 1.33× on the LoRA path. **The matrix row is left as measured rather than overwritten**, since every other LoRA cell in this file carries the same r=64 padding and overwriting one row would break internal comparability.
-- **On E2B, FA's ~3.9× lead over TRITON_ATTN at 100k** (3181 vs 12490) is the widest gap in this table — the same `head_dim=512` Triton tuning gap as footnote ², and it costs FA the BF16-KV fallback.
+**These are faster than the matrix row above (152 / 3134) because the matrix ran `max_lora_rank=64`.** A same-session control at r=64 gives 150.4 / 3100.9, i.e. within ~1% of the matrix row — ordinary variance on a shared host, across both a checkpoint change (this A/B predates the online conversion) and a rank change. See the `lora-cost` skill: the 4× rank padding alone is worth 1.33× on the LoRA path. **The matrix row is left as measured rather than overwritten**, since every other LoRA cell in this file carries the same r=64 padding and overwriting one row would break internal comparability.
+- **On E2B, FA's ~4.0× lead over TRITON_ATTN at 100k** (3134 vs 12409) is the widest gap in this table — the same `head_dim=512` Triton tuning gap as footnote ², and it costs FA the BF16-KV fallback.
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM (`SHORT_CONV`, `LINEAR`, `GDN_ATTN`) backends are not applicable to standard dense LLMs on NVIDIA datacenter GPUs.
 
 ---
 
 ## NVIDIA L40S 46GB (SM89, Ada)
 
-Default precision: **FP8 W8A8 weights + FP8 KV cache**. Last measured **2026-08-21**.
+Default precision: **FP8 W8A8 weights (quantized online from the BF16 base, `--precision fp8_per_channel`) + FP8 KV cache**. Last measured **2026-08-25**.
 
-**Every cell in this section is measured at `--gpu_memory_utilization 0.75`, not the default** — the only section that departs wholesale. On 46 GB, 6 of the 7 cells that OOM at the default run fine at 0.75 (only FLEX at 100k still fails), so measuring at the default would fill the table with ❌ cells describing the budget rather than the backend. Cells that already passed shifted by under 2% (Llama TRITON_ATTN at 100k: 24903 ms at default vs 25153 ms at 0.75).
+**Every cell in this section is measured at `--gpu_memory_utilization 0.75`, not the default** — the only section that departs wholesale. On 46 GB, 6 of the 7 cells that OOM at the default run fine at 0.75 (only FLEX at 100k still fails), so measuring at the default would fill the table with ❌ cells describing the budget rather than the backend. Cells that already passed shifted by under 2% (Llama TRITON_ATTN at 100k: 24903 ms at default vs 25153 ms at 0.75, both measured on the offline FP8 checkpoint this section used before the online conversion).
 
 | Package | Version |
 |---|---|
@@ -322,22 +328,23 @@ If any of these has a newer release, the table below is likely stale — rerun t
 
 | Model | FLASH_ATTN | FLASHINFER | TRITON_ATTN | FLEX_ATTENTION |
 |---|---|---|---|---|
-| Gemma 4 E2B (`prithivMLmods/gemma-4-E2B-it-FP8`) | ❌ head_size unsupported¹ | **373**³ / **8549**³˒⁴ | **373** / **8514**⁴ | ❌ KV sharing not supported² |
-| Gemma 4 E4B (`prithivMLmods/gemma-4-E4B-it-FP8`) | ❌ head_size unsupported¹ | **558**³ / **10544**³ | **569** / **10555** | ❌ KV sharing not supported² |
-| Llama 3.2 3B Instruct (`RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic`) | **402**⁵ / 12224⁵ | **405** / **11012** | 542 / 25153 | 838⁵ / ❌ OOM⁶ |
+| Gemma 4 E2B (`google/gemma-4-E2B-it`) | ❌ head_size unsupported¹ | **372**³ / **8634**³˒⁴ | **372** / **8577**⁴ | ❌ KV sharing not supported² |
+| Gemma 4 E4B (`google/gemma-4-E4B-it`) | ❌ head_size unsupported¹ | **562**³ / **10579**³ | **566** / **10545** | ❌ KV sharing not supported² |
+| Llama 3.2 3B Instruct (`unsloth/Llama-3.2-3B-Instruct`) | **408**⁵ / 12137⁵ | **404** / **10757** | 542 / 25315 | 845⁵ / ❌ OOM⁶ |
 
 **Footnotes**:
 - ¹ On Ada the vendored FA is **FlashAttention v2** (the cute / FA4 path is Hopper+ only). FA2 rejects Gemma 4's `head_size=512`, and the FP8-KV tier is rejected first on `kv_cache_dtype`, so both tiers fail. Budget-independent — unchanged at 0.75. (vLLM reports `head_size=512` for Gemma 4; the HF per-layer `head_dim` is 256, so don't cross-check these two numbers against each other.)
 - ² FLEX_ATTENTION rejects FP8 KV; on its BF16-KV fallback it rejects Gemma 4's sliding-window/global KV-sharing. No viable tier, at any budget.
-- ³ FLASHINFER runs Gemma 4 here only on the **BF16-KV** fallback tier. The FP8-KV tier fails in flashinfer's JIT arch-flag helper (`jit/attention/modules.py::_fa2_head_dim_nvcc_flags`) with `No supported CUDA architectures found for major versions [10, 11, 12]` — that path is gated to compute capability 10.x+ (Blackwell and newer), and Ada is 8.9. These cells therefore pay a 2× KV-memory cost relative to the FP8-KV Triton cells beside them. **This is evidence for the open question in the H100 footnote ⁴**: the arch gate applies to the FP8-KV path, not to `head_size=512` in general, which is why A100 (CC 8.0) runs Gemma 4 under FLASHINFER on its BF16-KV tier while Ada and Hopper fail on FP8 KV.
+- ³ FLASHINFER runs Gemma 4 here only on the **BF16-KV** fallback tier. The FP8-KV tier fails in flashinfer's JIT arch-flag helper (`jit/attention/modules.py::_fa2_head_dim_nvcc_flags`) with `No supported CUDA architectures found for major versions [10, 11, 12]` — that path is gated to compute capability 10.x+ (Blackwell and newer), and Ada is 8.9. These cells therefore pay a 2× KV-memory cost relative to the FP8-KV Triton cells beside them. **The gate is KV-dtype-specific, not a blanket `head_size=512` limit** — the BF16-KV tier runs the same model on the same card, and A100 (CC 8.0) does too. **Ada's mechanism is unrelated to Hopper's**, which is a separate SM90-only sliding-window guard that fires at *every* KV dtype (H100 footnote ⁴); an earlier version of this footnote wrongly offered Ada's arch gate as the explanation for both.
 - ⁴ **These two 100k cells require the int64 punica patch and do not run on any release** — see *Stack and patches*. This was the third compute capability to reproduce it, which is what established the bug as GPU-independent.
 - ⁵ FA2 rejects FP8 KV for Llama, and FLEX rejects it outright, so these cells fall back to a **BF16 KV cache**. The FLASHINFER and TRITON_ATTN Llama cells use the default FP8 KV.
 - ⁶ The only cell that still OOMs at 0.75, so unlike the other OOMs this is a real limit rather than a budget artifact: FLEX's compile-time block-mask metadata plus a BF16 KV cache do not fit at 100k on 46 GB. The A100 section reports the same cell failing the same way at 0.75 on 80 GB.
 
 **Notes**:
 - All cells are measured with a LoRA adapter loaded (r=16, α=16, 7 standard projection modules). See the "LoRA adapters used for every benchmark" table near the top of this file.
-- **The old "TRITON_ATTN is the only working backend for Gemma 4 on Ada" claim is retired.** It was an artifact of a 0.21.0-era flashinfer plus the default memory budget: FLASHINFER now runs both Gemma 4 models at both lengths, and at 100k the two backends are a **statistical tie** (E4B 10544 vs 10555; E2B 8549 vs 8514 — well inside run-to-run noise). Pick between them on KV memory, not speed: Triton keeps FP8 KV while FlashInfer is forced to BF16 KV (footnote ³), which matters on a 46 GB card.
-- **FLASHINFER is the backend to reach for on Llama at 100k** (11012 ms, ~10% ahead of FA's 12224) and ties FA at 10k. This is a **ranking flip** versus the previous 0.21.0-era measurement, where FA led at 100k and FLASHINFER OOMed. TRITON_ATTN is ~2.3× slower at 100k and is a correctness fallback only.
+- **The old "TRITON_ATTN is the only working backend for Gemma 4 on Ada" claim is retired.** It was an artifact of a 0.21.0-era flashinfer plus the default memory budget: FLASHINFER now runs both Gemma 4 models at both lengths, and at 100k the two backends are a **statistical tie** (E4B 10579 vs 10545; E2B 8634 vs 8577 — well inside run-to-run noise). Pick between them on KV memory, not speed: Triton keeps FP8 KV while FlashInfer is forced to BF16 KV (footnote ³), which matters on a 46 GB card.
+- **FLASHINFER is the backend to reach for on Llama at 100k** (10757 ms, ~11% ahead of FA's 12137) and ties FA at 10k. This is a **ranking flip** versus the previous 0.21.0-era measurement, where FA led at 100k and FLASHINFER OOMed. TRITON_ATTN is ~2.3× slower at 100k and is a correctness fallback only.
+- **Online quantization is latency-neutral here, which is what makes this section comparable to the offline-checkpoint sections.** All 16 cells were re-measured against BF16 bases with `--precision fp8_per_channel` and land within **2.3% of the offline FP8 checkpoints they replaced** (most under 1%), with every ❌ cell failing for the identical reason. `fp8_per_channel` is recipe-matched to llmcompressor's `FP8_DYNAMIC`, so this is the expected result — but it is worth having measured, because it means one BF16 base can serve the 8-bit tier on every GPU without hunting for a per-model checkpoint.
 - **46 GB is tight at 100k, but read an OOM as a budget symptom before a backend limit.** That is the single most load-bearing lesson from this refresh: at the default budget this card looked like it had lost FlashInfer support entirely for all three models. Lower `--gpu_memory_utilization` (0.75 works for everything except footnote ⁶) before concluding a backend is unsupported here.
 - FLEX_ATTENTION is not viable on Ada — it rejects FP8 KV everywhere, rejects Gemma 4's KV sharing, and is both the slowest option at 10k and the only OOM at 100k.
 - MLA-only backends (`*_MLA`), AMD (`ROCM_*`), Intel XPU, CPU, and hybrid/SSM (`SHORT_CONV`, `LINEAR`, `GDN_ATTN`) backends are not applicable to standard dense LLMs on NVIDIA datacenter GPUs.
@@ -347,6 +354,8 @@ If any of these has a newer release, the table below is likely stale — rerun t
 ## NVIDIA A100 SXM4 80GB (SM80, Ampere)
 
 Default precision: **INT8 W8A8 weights + BF16 KV cache**. Last measured **2026-08-21**.
+
+**This tier stays on pre-quantized checkpoints, unlike the FP8 sections.** vLLM's `int8_per_channel_weight_only` online scheme sets only the MoE spec, so on a dense model every Linear silently stays BF16 and the run would report BF16 latency under an INT8 label — `vllm_local.py` refuses it rather than measuring it. Being 8-bit is not sufficient; `fp8_*` is currently the only online family that covers dense layers.
 
 | Package | Version |
 |---|---|
@@ -382,7 +391,7 @@ If any of these has a newer release, the table below is likely stale — rerun t
 **Notes**:
 - **FLASHINFER is the default on A100** — fastest at both lengths for all three models, provided you drop the memory budget to 0.75 at 100k (footnote ²). vLLM picks `CutlassInt8ScaledMMLinearKernel` for the linear-layer matmul; attention runs in BF16 against the BF16 KV cache.
 - **"Triton is the only backend that works for Gemma 4 on Ampere" is no longer true.** FLASHINFER now accepts `head_dim=512` on SM80 and is ~1.8–1.9× faster than TRITON_ATTN at 100k on both Gemma models. The durable lesson: **a head-size rejection is a fact about a specific FlashInfer version's cubin coverage, not a property of the SM** — recheck it after every FlashInfer bump instead of treating it as a permanent hardware limit.
-- **Gemma 4 under FLASHINFER works on SM80 but not SM90, on identical flashinfer 0.6.16.post3** — an inversion worth understanding before assuming newer hardware is strictly more capable. Since SM80 is the *older* architecture, `head_dim=512` support can't be gated purely on SM version; the difference is most likely the KV dtype (Ampere is forced to BF16 KV, Hopper defaults to FP8 KV, and the FP8-KV head_dim=512 path is the one needing trtllm-gen cubins). Not yet confirmed — see H100 footnote ⁴.
+- **Gemma 4 under FLASHINFER works on SM80 but not SM90, on identical flashinfer 0.6.16.post3** — an inversion worth remembering before assuming newer hardware is strictly more capable. **Now explained** (H100 footnote ⁴): vLLM has an SM90-*only* guard that refuses FlashInfer for any model with sliding-window layers, so Hopper is excluded by compute capability alone while Ampere is untouched. It has nothing to do with `head_dim=512` or the KV dtype, and this note previously guessed the KV dtype — wrongly.
 - **The expensive mistake on this GPU is trusting a default-budget OOM.** Taken at face value, the default-budget sweep says FlashInfer is unusable at 100k and Triton is the only option; the 0.75 retest says FlashInfer is the fastest backend by ~2× on Gemma.
 - **TRITON_ATTN** is the portable fallback and always runs, but costs 1.8–1.9× (Gemma) to 3.3× (Llama) versus the best backend at 100k. Its 10k penalty is much smaller, so it's a more defensible choice for short-prompt traffic than the 100k column suggests.
 - **FLASH_ATTN** uses the FA2 codepath on Ampere. It ties FlashInfer at 10k on the dense model and trails it ~8% at 100k, and rejects both Gemma 4 checkpoints outright.
