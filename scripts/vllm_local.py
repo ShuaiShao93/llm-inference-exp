@@ -12,6 +12,29 @@ _FP4_FORMATS = {"nvfp4-pack-quantized", "nvfp4", "mxfp4", "dense-mxfp4"}
 _DTYPE_ALIASES = {"bf16": "bfloat16", "fp16": "float16"}
 _DTYPE_VALUES = {"float16", "bfloat16", "float32", "float", "auto", "half"}
 
+# vLLM's online-quantization shorthands: quantize a BF16/FP16 checkpoint at load
+# time instead of loading a pre-quantized one. Passed straight through as
+# `quantization=`, so this set only needs to list what vLLM accepts.
+_ONLINE_SCHEMES = {
+    "fp8_per_tensor",
+    "fp8_per_block",
+    "fp8_per_channel",
+    "mxfp8",
+    "nvfp4_per_token",
+    "int8_per_channel_weight_only",
+}
+
+# These shorthands set only vLLM's `moe` spec, so dense Linear layers fall back to
+# UnquantizedLinearMethod. On a model without routed experts they quantize nothing
+# and the run silently reports BF16 latency under an FP4/INT8 label.
+_ONLINE_MOE_ONLY_SCHEMES = {"nvfp4_per_token", "int8_per_channel_weight_only"}
+_MOE_CONFIG_KEYS = (
+    "num_experts",
+    "num_local_experts",
+    "n_routed_experts",
+    "num_experts_per_tok",
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark vLLM inference latency")
@@ -19,8 +42,11 @@ def parse_args():
     parser.add_argument(
         "--precision",
         default="fp4",
-        help="Target precision: fp4, fp8, bf16, fp16, awq, gptq, or auto. "
-             "Exits with an error if it doesn't match the model's built-in quantization.",
+        help="Either an offline precision that must match the checkpoint's built-in "
+             "quantization (fp4, fp8, int8, bf16, fp16, awq, gptq, auto), or an online "
+             "scheme quantized at load time from a BF16/FP16 base: "
+             + ", ".join(sorted(_ONLINE_SCHEMES))
+             + ". Exits with an error if the checkpoint and the request disagree.",
     )
     parser.add_argument("--input_tokens", type=int, default=15000)
     parser.add_argument("--max_output_tokens", type=int, default=1)
@@ -159,12 +185,46 @@ def check_precision(model_id, requested):
         )
 
 
+def has_routed_experts(model_id):
+    cfg = _load_hf_config(model_id)
+    for scope in (cfg, cfg.get("text_config") or {}, cfg.get("language_config") or {}):
+        if scope.get("enable_moe_block") is True:
+            return True
+        if any(scope.get(k) for k in _MOE_CONFIG_KEYS):
+            return True
+    return False
+
+
+def check_online_base(model_id, scheme):
+    """Online quantization starts from unquantized weights; refuse a quantized base."""
+    model_precision = get_model_precision(model_id)
+    if model_precision not in ("bf16", "fp16"):
+        sys.exit(
+            f"Error: online scheme '{scheme}' needs a BF16/FP16 base checkpoint, but "
+            f"'{model_id}' is already quantized to '{model_precision}'.\n"
+            f"Either point --model at the unquantized base or use --precision "
+            f"{model_precision} to benchmark the pre-quantized checkpoint offline."
+        )
+    if scheme in _ONLINE_MOE_ONLY_SCHEMES and not has_routed_experts(model_id):
+        sys.exit(
+            f"Error: online scheme '{scheme}' only quantizes routed-expert (MoE) "
+            f"weights, and '{model_id}' has none — every Linear layer would stay BF16, "
+            f"so the run would report BF16 latency under a '{scheme}' label.\n"
+            f"vLLM has no online scheme that quantizes dense Linear layers below 8 bits; "
+            f"use a pre-quantized checkpoint for sub-8-bit on a dense model."
+        )
+
+
 def main():
     args = parse_args()
 
     precision = _DTYPE_ALIASES.get(args.precision.lower(), args.precision.lower())
+    online = precision in _ONLINE_SCHEMES
 
-    check_precision(args.model, precision)
+    if online:
+        check_online_base(args.model, precision)
+    else:
+        check_precision(args.model, precision)
 
     attention_backend = args.attention_backend.upper()
 
@@ -208,16 +268,18 @@ def main():
             "torch_profiler_dir": profile_dir,
         }
 
-    # Only set explicit quantization for vLLM-managed methods (awq, gptq, …)
-    # fp4/fp8/int8 are embedded in the model config and auto-detected by vLLM
-    if precision not in _DTYPE_VALUES and precision not in ("fp4", "fp8", "int8", "auto"):
+    # Online schemes and vLLM-managed methods (awq, gptq, …) are both requested via
+    # `quantization`; fp4/fp8/int8 are embedded in the model config and auto-detected.
+    if online:
+        llm_kwargs["quantization"] = precision
+    elif precision not in _DTYPE_VALUES and precision not in ("fp4", "fp8", "int8", "auto"):
         llm_kwargs["quantization"] = precision
         llm_kwargs["dtype"] = "auto"
     elif precision in _DTYPE_VALUES:
         llm_kwargs["dtype"] = precision
 
     print(f"Model:            {args.model}")
-    print(f"Precision:        {args.precision}")
+    print(f"Precision:        {args.precision} ({'online' if online else 'offline'})")
     print(f"Input tokens:     {args.input_tokens}")
     print(f"Max output tokens:{args.max_output_tokens}")
     print(f"Sliding window:   {args.sliding_window if args.sliding_window is not None else 'model default'}")

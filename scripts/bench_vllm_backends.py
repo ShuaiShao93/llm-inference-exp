@@ -6,19 +6,19 @@ the agent then formats into a markdown table in ``backend_compatibility.md``.
 Usage:
     PYTHONNOUSERSITE=0 CUDA_HOME=/usr/local/cuda \\
     /usr/bin/python3.12 scripts/bench_vllm_backends.py \\
-      --model prithivMLmods/gemma-4-E4B-it-FP8 \\
-      --model RedHatAI/Llama-3.2-3B-Instruct-FP8-dynamic \\
+      --model google/gemma-4-E4B-it \\
+      --model unsloth/Llama-3.2-3B-Instruct \\
       --backends FLASH_ATTN FLASHINFER TRITON_ATTN FLEX_ATTENTION \\
-      --input_tokens 10000 100000 \\
-      --output /tmp/vllm_backend_matrix.json
+      --input_tokens 10000 100000
 
 The script shells out to ``scripts/vllm_local.py`` once per (model, backend,
 input length, precision-tier). It never runs two benchmark processes
 concurrently and always captures stdout/stderr for failure diagnosis.
 
-Precision tiers tried, in order, until one succeeds:
-  Hopper / Ada (SM 8.9/9.0):  fp8 + fp8 KV  ->  fp8 + auto (BF16) KV
-  Blackwell  (SM 10.x/12.x):  fp4 + fp8 KV  ->  fp4 + auto KV  ->  fp8 + fp8 KV  ->  fp8 + auto KV
+Precision tiers tried, in order, until one succeeds. The 8-bit tiers are quantized
+online from a BF16 base; fp4/int8 need a pre-quantized checkpoint.
+  Hopper / Ada (SM 8.9/9.0):  fp8_per_channel + fp8 KV  ->  fp8_per_channel + auto (BF16) KV
+  Blackwell  (SM 10.x/12.x):  fp4 + fp8 KV  ->  fp4 + auto KV  ->  fp8_per_channel + fp8 KV  ->  fp8_per_channel + auto KV
 
 If all tiers fail, the cell is recorded as a failure with the reason from the last
 tier that actually ran (see ``failure_reason``) — the aggressive first tier is
@@ -55,6 +55,12 @@ DEFAULT_BACKENDS = [
 ]
 
 
+#: Tier precisions that vLLM quantizes at load time. Unlike an offline precision,
+#: these *require* an unquantized base, so the "checkpoint is X-only" skip below
+#: must not treat them as mismatched against a BF16/FP16 checkpoint.
+_ONLINE_TIER_PRECISIONS = frozenset({"fp8_per_channel", "fp8_per_tensor", "fp8_per_block", "mxfp8"})
+
+
 def detect_precision_tiers(compute_cap: str) -> list[tuple[str, str]]:
     """Return ordered (precision, kv_cache_precision) tiers for this GPU.
 
@@ -62,20 +68,25 @@ def detect_precision_tiers(compute_cap: str) -> list[tuple[str, str]]:
     the first entry — any cell that ends up using a later entry is annotated.
     """
     cc = float(compute_cap)  # "9.0" -> 9.0
+    # The 8-bit tiers quantize online from the BF16 base, so they need no
+    # precision-matched checkpoint. fp8_per_channel matches llmcompressor's
+    # FP8_DYNAMIC recipe, keeping the numbers comparable with older rows measured
+    # from those checkpoints. Sub-8-bit has no online path for dense layers, so
+    # fp4/int8 tiers still require a pre-quantized checkpoint.
     if cc >= 10.0:
         # Blackwell — native FP4 tensor cores. Per CLAUDE.md: SM120 has no
         # FP4-KV FMHA, so FP8 KV cache is the floor regardless of SM.
         return [
             ("fp4", "fp8"),
             ("fp4", "auto"),
-            ("fp8", "fp8"),
-            ("fp8", "auto"),
+            ("fp8_per_channel", "fp8"),
+            ("fp8_per_channel", "auto"),
         ]
     if cc >= 8.9:
         # Hopper / Ada — native FP8 tensor cores.
         return [
-            ("fp8", "fp8"),
-            ("fp8", "auto"),
+            ("fp8_per_channel", "fp8"),
+            ("fp8_per_channel", "auto"),
         ]
     # Ampere (SM 8.0/8.6) — no native FP8/FP4 tensor cores, but INT8 tensor
     # cores are available (added in Turing SM 7.5). W8A8 INT8 is the natural
@@ -193,6 +204,10 @@ def run_one(
         # so the lower-precision fallback tiers are unreachable for it by design.
         (r"requested precision '(\w+)' does not match model's built-in precision '(\w+)'",
             lambda m: f"checkpoint is {m.group(2)}-only (tier requested {m.group(1)})", True),
+        # Mirror image: an online tier pointed at an already-quantized checkpoint.
+        # Same vocabulary, so the tier ladder skips the rest for the same reason.
+        (r"online scheme '(\S+)' needs a BF16/FP16 base checkpoint.*already quantized to '(\w+)'",
+            lambda m: f"checkpoint is {m.group(2)}-only (tier requested {m.group(1)})", True),
         (r"flashinfer-cubin version \([^)]+\) does not match flashinfer version",
             "flashinfer-cubin / flashinfer-python version mismatch (env bug, not a backend limit)", True),
     ]
@@ -226,7 +241,14 @@ def run_cell(
         # A pre-quantized checkpoint rejects every precision but its own, so once
         # we've learned what it was built at, don't spend an engine init per tier
         # rediscovering that. Only the KV-dtype fallbacks remain meaningful.
-        if builtin_precision is not None and precision != builtin_precision:
+        # An online tier is the mirror image: it is reachable precisely when the
+        # checkpoint is *un*quantized, so exclude it from the mismatch skip.
+        reachable = (
+            precision in _ONLINE_TIER_PRECISIONS
+            if builtin_precision in ("bf16", "fp16")
+            else precision == builtin_precision
+        )
+        if builtin_precision is not None and not reachable:
             attempts.append({"precision": precision, "kv": kv, "status": "fail",
                              "reason": f"skipped — checkpoint is {builtin_precision}-only",
                              "length_invariant": True})
@@ -293,13 +315,15 @@ def main() -> int:
                          "length-invariant reason. Slower; use to double-check a suspicious cell.")
     ap.add_argument("--per_cell_timeout_s", type=int, default=1800,
                     help="Per (model, backend, precision-tier) timeout. Default 30 min.")
-    ap.add_argument("--output", default="/tmp/vllm_backend_matrix.json",
+    # Defaults live in $HOME, not /tmp: benchmark hosts are preemptible and /tmp is
+    # wiped on stop, which would throw away a multi-hour sweep.
+    ap.add_argument("--output", default=str(Path.home() / "vllm_backend_matrix.json"),
                     help="JSON results path. The agent reads this to write the markdown.")
     ap.add_argument("--gpu_memory_utilization", type=float, default=None,
                     help="Pass-through to vllm_local.py. Lower it (e.g. 0.80) to retest a cell "
                          "that OOMed allocating a backend workspace — vLLM sizes the KV cache to "
                          "fill this budget, so a full budget can starve FlashInfer's workspace.")
-    ap.add_argument("--log_dir", default="/tmp/vllm_backend_matrix_logs")
+    ap.add_argument("--log_dir", default=str(Path.home() / "vllm_backend_matrix_logs"))
     ap.add_argument("--tokenizer_mode", default="auto",
                     help="Pass-through to vllm_local.py (auto/mistral/slow). Set 'mistral' for Mistral/Ministral checkpoints with only tekken.json.")
     ap.add_argument("--lora", action="append", default=[],
